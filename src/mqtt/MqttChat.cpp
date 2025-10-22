@@ -19,9 +19,7 @@ MqttChat::MqttChat(const char* host,
   topic_(topic_default ? topic_default : "public/chat"),
   mqtt_(tls_) {}
 
-void MqttChat::setRootCA(const char* ca_pem) {
-  root_ca_pem_ = ca_pem;
-}
+void MqttChat::setRootCA(const char* ca_pem) { root_ca_pem_ = ca_pem; }
 
 String MqttChat::makeClientId() const {
   uint8_t mac[6]; WiFi.macAddress(mac);
@@ -34,7 +32,6 @@ String MqttChat::makeClientId() const {
 void MqttChat::begin() {
   mqtt_.setServer(host_.c_str(), port_);
   clientId_ = makeClientId();
-
   if (root_ca_pem_) tls_.setCACert(root_ca_pem_);
   else              tls_.setInsecure();    // simple para pruebas
 }

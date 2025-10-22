@@ -21,14 +21,14 @@ public:
   String getTopic() const { return topic_; }
 
   // Conexión
-  bool connected() { return mqtt_.connected(); }  // no-const (PubSubClient::connected es no-const)
-  void setRootCA(const char* ca_pem);             // opcional, si quieres validar TLS
+  bool connected() { return mqtt_.connected(); }  // PubSubClient::connected() no es const
+  void setRootCA(const char* ca_pem);             // opcional, para validar TLS
   bool ensureConnected();
 
-  // Texto de estado (no-const por .connected() no-const)
+  // Estado
   String status();
 
-  // Reconfigurar broker/credenciales en runtime
+  // Reconfig en runtime
   void setServer(const String& host, uint16_t port);
   void setAuth(const String& user, const String& pass);
 
