@@ -1,8 +1,10 @@
+// File: src/web/WebUI.cpp
 #include "web/WebUI.h"
 #include <WiFi.h>
 
+// =================== Rutas ===================
 void WebUI::begin() {
-  // Rutas
+  // Home + Wi-Fi
   server_.on("/",               HTTP_GET,  [this]{ handleRoot(); });
   server_.on("/wifi/info",      HTTP_GET,  [this]{ handleWifiInfo(); });
   server_.on("/wifi/scan",      HTTP_GET,  [this]{ handleWifiScan(); });
@@ -10,12 +12,22 @@ void WebUI::begin() {
   server_.on("/wifi/saved",     HTTP_GET,  [this]{ handleWifiSaved(); });
   server_.on("/wifi/saved/do",  HTTP_POST, [this]{ handleWifiSavedAction(); });
 
+  // MQTT
   server_.on("/mqtt",           HTTP_GET,  [this]{ handleMqtt(); });
   server_.on("/mqtt/set",       HTTP_POST, [this]{ handleMqttSet(); });
   server_.on("/mqtt/publish",   HTTP_POST, [this]{ handleMqttPublish(); });
   server_.on("/mqtt/poll",      HTTP_GET,  [this]{ handleMqttPoll(); });
 
-  server_.onNotFound([this]{ handleNotFound(); });
+  // Irrigación (status/json)
+  server_.on("/riego",          HTTP_GET,  [this]{ handleIrrigation(); });
+  server_.on("/riego.json",     HTTP_GET,  [this]{ handleIrrigationJson(); });
+
+  // ====== ESTADOS ======
+  server_.on("/states",         HTTP_GET,  [this]{ handleStatesList(); });
+  server_.on("/states/save",    HTTP_POST, [this]{ handleStatesSave(); });
+  server_.on("/states/delete",  HTTP_POST, [this]{ handleStatesDelete(); });
+
+  server_.onNotFound([this]{ server_.send(404, F("text/plain"), F("404")); });
 
   server_.begin();
 }
@@ -25,40 +37,40 @@ void WebUI::loop() {
 }
 
 void WebUI::attachMqttSink() {
-  // Recibir mensajes y mostrarlos en /mqtt (polling)
   chat_.onMessage([this](const String& t, const String& p){ pushMsg_(t, p); });
-  chat_.setSubTopic(cfg_.subTopic);
-  chat_.subscribe(); // activa recepción
+  chat_.subscribe();
 }
 
 /* ====================== Preferencias Wi-Fi ====================== */
 bool WebUI::loadSaved() {
   savedCount_ = 0; autoIdx_ = -1;
-  if (!prefs_.begin(NS_WIFI, /*ro*/ true)) return false;
-  int cnt = prefs_.getInt("count", 0);
-  autoIdx_ = prefs_.getInt("auto_idx", -1);
+  Preferences prefs;
+  if (!prefs.begin(NS_WIFI, /*ro*/ true)) return false;
+  int cnt = prefs.getInt("count", 0);
+  autoIdx_ = prefs.getInt("auto_idx", -1);
   for (int i=0;i<cnt && i<MAX_SAVED;i++){
     SavedNet n;
-    n.ssid = prefs_.getString((String("n")+i+"_ssid").c_str(), "");
-    n.pass = prefs_.getString((String("n")+i+"_pass").c_str(), "");
-    n.open = prefs_.getBool   ((String("n")+i+"_open").c_str(), false);
+    n.ssid = prefs.getString((String("n")+i+"_ssid").c_str(), "");
+    n.pass = prefs.getString((String("n")+i+"_pass").c_str(), "");
+    n.open = prefs.getBool   ((String("n")+i+"_open").c_str(), false);
     if (n.ssid.length()) saved_[savedCount_++] = n;
   }
-  prefs_.end();
+  prefs.end();
   if (autoIdx_ < -1 || autoIdx_ >= savedCount_) autoIdx_ = -1;
   return true;
 }
 bool WebUI::persistSaved() {
-  if (!prefs_.begin(NS_WIFI, /*ro*/ false)) return false;
-  prefs_.clear();
-  prefs_.putInt("count", savedCount_);
-  prefs_.putInt("auto_idx", autoIdx_);
+  Preferences prefs;
+  if (!prefs.begin(NS_WIFI, /*ro*/ false)) return false;
+  prefs.clear();
+  prefs.putInt("count", savedCount_);
+  prefs.putInt("auto_idx", autoIdx_);
   for (int i=0;i<savedCount_;i++){
-    prefs_.putString((String("n")+i+"_ssid").c_str(), saved_[i].ssid);
-    prefs_.putString((String("n")+i+"_pass").c_str(), saved_[i].pass);
-    prefs_.putBool  ((String("n")+i+"_open").c_str(), saved_[i].open);
+    prefs.putString((String("n")+i+"_ssid").c_str(), saved_[i].ssid);
+    prefs.putString((String("n")+i+"_pass").c_str(), saved_[i].pass);
+    prefs.putBool  ((String("n")+i+"_open").c_str(), saved_[i].open);
   }
-  prefs_.end();
+  prefs.end();
   return true;
 }
 int WebUI::findSavedBySsid(const String& ssid) const {
@@ -71,8 +83,10 @@ bool WebUI::addOrUpdateSaved(const String& ssid, const String& pass, bool openNe
     saved_[idx].pass = pass;
     saved_[idx].open = openNet;
   } else if (savedCount_ < MAX_SAVED){
-    saved_[savedCount_++] = SavedNet{ssid, pass, openNet};
-    idx = savedCount_-1;
+    SavedNet tmp(ssid, pass, openNet);
+    saved_[savedCount_] = tmp;
+    idx = savedCount_;
+    savedCount_++;
   } else {
     return false;
   }
@@ -100,13 +114,13 @@ String WebUI::htmlHeader(const String& title) const {
   s += F("<!doctype html><html><head><meta charset='utf-8'>");
   s += F("<meta name='viewport' content='width=device-width, initial-scale=1'>");
   s += F("<title>"); s += title; s += F("</title>");
-  s += F("<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:16px}code,pre{background:#f4f4f4;padding:2px 4px;border-radius:4px}table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px}</style>");
+  s += F("<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:16px}code,pre{background:#f4f4f4;padding:2px 4px;border-radius:4px}table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px}input[type=checkbox]{transform:scale(1.2)} .rowform{display:inline} </style>");
   s += F("</head><body>");
   s += F("<h2>Riego ESP32 - WebUI</h2>");
   s += F("<p>AP: <b>config</b> · mDNS: <a href='http://config.local/'>config.local</a></p>");
   s += F("<p>IP AP: <code>");  s += ipAP;  s += F("</code><br>");
   s += F("IP LAN (STA): <code>"); s += ipSTA; s += F("</code></p>");
-  s += F("<nav><a href='/'>Home</a> · <a href='/wifi/info'>WiFi</a> · <a href='/wifi/scan'>Escanear</a> · <a href='/wifi/saved'>Guardadas</a> · <a href='/mqtt'>MQTT</a></nav><hr/>");
+  s += F("<nav><a href='/'>Home</a> · <a href='/states'>Estados</a> · <a href='/wifi/info'>WiFi</a> · <a href='/wifi/scan'>Escanear</a> · <a href='/wifi/saved'>Guardadas</a> · <a href='/mqtt'>MQTT</a></nav><hr/>");
   return s;
 }
 String WebUI::htmlFooter() const {
@@ -125,13 +139,15 @@ String WebUI::jsonEscape(String s) {
 void WebUI::handleRoot() {
   String s = htmlHeader(F("Home"));
   s += F("<p>Este servidor reemplaza el menú por Serial. Conéctate al AP <b>config</b> (pass <code>password</code>) y abre <a href='http://config.local/'>config.local</a>.</p>");
-  s += F("<ul><li><a href='/wifi/info'>Estado Wi-Fi</a></li>");
+  s += F("<ul><li><a href='/states'>Estados (ver/editar/agregar)</a></li>");
+  s += F("<li><a href='/wifi/info'>Estado Wi-Fi</a></li>");
   s += F("<li><a href='/wifi/scan'>Escanear y conectar</a></li>");
   s += F("<li><a href='/wifi/saved'>Redes guardadas / autoconexión</a></li>");
   s += F("<li><a href='/mqtt'>MQTT (config, estado, chat)</a></li></ul>");
   s += htmlFooter();
   server_.send(200, F("text/html; charset=utf-8"), s);
 }
+
 void WebUI::handleWifiInfo() {
   String s = htmlHeader(F("Wi-Fi"));
   s += F("<h3>Estado Wi-Fi</h3>");
@@ -145,6 +161,7 @@ void WebUI::handleWifiInfo() {
   s += htmlFooter();
   server_.send(200, F("text/html; charset=utf-8"), s);
 }
+
 void WebUI::handleWifiScan() {
   int n = WiFi.scanComplete();
   if (n == WIFI_SCAN_RUNNING || n == -2) {
@@ -179,6 +196,7 @@ void WebUI::handleWifiScan() {
   s += htmlFooter();
   server_.send(200, F("text/html; charset=utf-8"), s);
 }
+
 void WebUI::handleWifiConnect() {
   String ssid = server_.arg("ssid");
   String pass = server_.arg("pass");
@@ -200,6 +218,7 @@ void WebUI::handleWifiConnect() {
   server_.sendHeader(F("Refresh"), "2; url=/wifi/info");
   server_.send(200, F("text/html"), F("<meta http-equiv='refresh' content='2'><p>Conectando… regresar&aacute; a Wi-Fi/Estado.</p>"));
 }
+
 void WebUI::handleWifiSaved() {
   loadSaved();
   String s = htmlHeader(F("Guardadas"));
@@ -213,22 +232,21 @@ void WebUI::handleWifiSaved() {
       s += (i==autoIdx_) ? F("⭐") : F("&nbsp;");
       s += F("</td><td>"); s += saved_[i].open ? F("OPEN") : F("PSK");
       s += F("</td><td>"); s += saved_[i].ssid; s += F("</td><td>");
-      // acciones: conectar / auto / borrar
-      s += F("<form style='display:inline' method='post' action='/wifi/saved/do'><input type='hidden' name='idx' value='"); s += String(i);
+      s += F("<form class='rowform' method='post' action='/wifi/saved/do'><input type='hidden' name='idx' value='"); s += String(i);
       s += F("'><input type='hidden' name='action' value='connect'><button>Conectar</button></form> ");
-      s += F("<form style='display:inline' method='post' action='/wifi/saved/do'><input type='hidden' name='idx' value='"); s += String(i);
+      s += F("<form class='rowform' method='post' action='/wifi/saved/do'><input type='hidden' name='idx' value='"); s += String(i);
       s += F("'><input type='hidden' name='action' value='setauto'><button>Auto</button></form> ");
-      s += F("<form style='display:inline' method='post' action='/wifi/saved/do'><input type='hidden' name='idx' value='"); s += String(i);
+      s += F("<form class='rowform' method='post' action='/wifi/saved/do'><input type='hidden' name='idx' value='"); s += String(i);
       s += F("'><input type='hidden' name='action' value='delete'><button>Eliminar</button></form>");
       s += F("</td></tr>");
     }
     s += F("</table>");
-    // desactivar auto
     s += F("<p><form method='post' action='/wifi/saved/do'><input type='hidden' name='action' value='disableauto'><button>Desactivar autoconexión</button></form></p>");
   }
   s += htmlFooter();
   server_.send(200, F("text/html; charset=utf-8"), s);
 }
+
 void WebUI::handleWifiSavedAction() {
   loadSaved();
   String action = server_.arg("action");
@@ -277,6 +295,7 @@ void WebUI::handleMqtt() {
   s += htmlFooter();
   server_.send(200, F("text/html; charset=utf-8"), s);
 }
+
 void WebUI::handleMqttSet() {
   if (server_.hasArg("host")) cfg_.host = server_.arg("host");
   if (server_.hasArg("port")) { long p=server_.arg("port").toInt(); if (p>=1 && p<=65535) cfg_.port=(uint16_t)p; }
@@ -286,28 +305,27 @@ void WebUI::handleMqttSet() {
   if (server_.hasArg("sub"))   cfg_.subTopic = server_.arg("sub");
 
   cfgStore_.save(cfg_);
-
   chat_.setServer(cfg_.host, cfg_.port);
   chat_.setAuth(cfg_.user, cfg_.pass);
   chat_.setTopic(cfg_.topic);
   chat_.setSubTopic(cfg_.subTopic);
-  chat_.subscribe(); // re-suscribirse tras cambio
+  chat_.subscribe();
 
   server_.sendHeader(F("Location"), "/mqtt");
   server_.send(302, F("text/plain"), "");
 }
+
 void WebUI::handleMqttPublish() {
   String msg = server_.arg("msg");
   bool ok = chat_.publish(msg);
   server_.sendHeader(F("Location"), "/mqtt");
   server_.send(302, F("text/plain"), ok ? "ok" : "fail");
 }
+
 void WebUI::handleMqttPoll() {
-  // 'last' = último seq que el cliente ya vio
   unsigned long last = 0;
   if (server_.hasArg("last")) last = strtoul(server_.arg("last").c_str(), nullptr, 10);
 
-  // Construir JSON con items de seq > last
   String out = F("{\"last\":");
   out += String(seqCounter_);
   out += F(",\"items\":[");
@@ -329,18 +347,173 @@ void WebUI::handleMqttPoll() {
   out += F("]}");
   server_.send(200, F("application/json"), out);
 }
-void WebUI::handleNotFound() {
-  server_.send(404, F("text/plain"), F("404"));
-}
 
-/* ========== MQTT sink buffer ========== */
 void WebUI::pushMsg_(const String& t, const String& p) {
   Msg& m = inbox_[writePos_];
   m.topic = t;
   m.payload = p;
   m.ms = millis();
-  m.seq = ++seqCounter_;             // secuencia monótona
-
+  m.seq = ++seqCounter_;
   writePos_ = (writePos_ + 1) % MSG_BUF;
-  if (used_ < MSG_BUF) used_++;     // si se llena, sobreescribe circular
+  if (used_ < MSG_BUF) used_++;
+}
+
+/* ===================== Irrigación (status) ===================== */
+void WebUI::handleIrrigation() {
+  String s = htmlHeader(F("Riego"));
+  s += F("<h3>Estado (resumen)</h3>");
+  s += F("<p>Ver <a href='/states'>Estados</a> para configurar combinaciones de relés.</p>");
+  s += htmlFooter();
+  server_.send(200, F("text/html; charset=utf-8"), s);
+}
+
+void WebUI::handleIrrigationJson() {
+  String out = F("{\"ok\":true}");
+  server_.send(200, F("application/json"), out);
+}
+
+/* ===================== ESTADOS (nuevo) ===================== */
+void WebUI::handleStatesList() {
+  if (!getStates_ || !getCounts_) {
+    server_.send(500, F("text/plain"), F("States API no inicializada"));
+    return;
+  }
+  std::vector<RelayState> st = getStates_();
+  std::pair<int,int> counts = getCounts_();
+  int numM = counts.first;
+  int numS = counts.second;
+
+  String s = htmlHeader(F("Estados"));
+  s += F("<h3>Estados de relés</h3>");
+  s += F("<p>Cada fila es un <b>estado</b>; cada columna un relé. Marca los que deben encenderse en ese estado.</p>");
+  s += F("<table><tr><th>#</th><th>Nombre</th><th>Always</th><th>Always12</th>");
+
+  // encabezados mains
+  for (int i=0;i<numM;i++){
+    s += F("<th>");
+    if (relayNameGetter_) s += relayNameGetter_(i, true);
+    else { s += F("M"); s += String(i); }
+    s += F("</th>");
+  }
+  // encabezados secs
+  for (int j=0;j<numS;j++){
+    s += F("<th>");
+    if (relayNameGetter_) s += relayNameGetter_(j, false);
+    else { s += F("S"); s += String(j); }
+    s += F("</th>");
+  }
+  s += F("<th>Acciones</th></tr>");
+
+  // filas existentes
+  for (size_t r=0;r<st.size();r++){
+    const RelayState& rs = st[r];
+    s += F("<tr><td>"); s += String((int)r); s += F("</td><td>");
+    s += F("<form class='rowform' method='post' action='/states/save'>");
+    s += F("<input type='hidden' name='idx' value='"); s += String((int)r); s += F("'>");
+    s += F("<input name='name' value='"); s += rs.name; s += F("' style='min-width:140px'>");
+    s += F("</td><td>");
+    s += F("<input type='checkbox' name='always' ");   if (rs.alwaysOn)  s += F("checked"); s += F(">");
+    s += F("</td><td>");
+    s += F("<input type='checkbox' name='a12' ");      if (rs.alwaysOn12) s += F("checked"); s += F(">");
+
+    // mains
+    for (int i=0;i<numM;i++){
+      bool on = (rs.mainsMask & (1u<<i)) != 0;
+      s += F("</td><td><input type='checkbox' name='m"); s += String(i); s += F("' ");
+      if (on) s += F("checked");
+      s += F(">");
+    }
+    // secs
+    for (int j=0;j<numS;j++){
+      bool on = (rs.secsMask & (1u<<j)) != 0;
+      s += F("</td><td><input type='checkbox' name='s"); s += String(j); s += F("' ");
+      if (on) s += F("checked");
+      s += F(">");
+    }
+
+    s += F("</td><td><button>Guardar</button> ");
+    s += F("</form>");
+    s += F("<form class='rowform' method='post' action='/states/delete' onsubmit='return confirm(\"¿Eliminar estado? \")'>");
+    s += F("<input type='hidden' name='idx' value='"); s += String((int)r); s += F("'>");
+    s += F("<button>Eliminar</button></form>");
+    s += F("</td></tr>");
+  }
+
+  // fila para agregar
+  s += F("<tr><td>+</td><td>");
+  s += F("<form class='rowform' method='post' action='/states/save'>");
+  s += F("<input type='hidden' name='idx' value='-1'>");
+  s += F("<input name='name' placeholder='Nuevo estado' style='min-width:140px'>");
+  s += F("</td><td><input type='checkbox' name='always'>");
+  s += F("</td><td><input type='checkbox' name='a12'>");
+  for (int i=0;i<numM;i++){
+    s += F("</td><td><input type='checkbox' name='m"); s += String(i); s += F("'>");
+  }
+  for (int j=0;j<numS;j++){
+    s += F("</td><td><input type='checkbox' name='s"); s += String(j); s += F("'>");
+  }
+  s += F("</td><td><button>Agregar</button></td></tr>");
+  s += F("</form>");
+
+  s += F("</table>");
+  s += htmlFooter();
+  server_.send(200, F("text/html; charset=utf-8"), s);
+}
+
+void WebUI::handleStatesSave() {
+  if (!getStates_ || !setStates_ || !getCounts_) {
+    server_.send(500, F("text/plain"), F("States API no inicializada"));
+    return;
+  }
+  int idx = server_.hasArg("idx") ? server_.arg("idx").toInt() : -1;
+  std::vector<RelayState> st = getStates_();
+
+  std::pair<int,int> counts = getCounts_();
+  int numM = counts.first;
+  int numS = counts.second;
+
+  RelayState rs;
+  if (server_.hasArg("name"))  rs.name = server_.arg("name");
+  rs.alwaysOn  = server_.hasArg("always");
+  rs.alwaysOn12= server_.hasArg("a12");
+
+  // construir masks
+  uint16_t mm = 0, sm = 0;
+  for (int i=0;i<numM;i++){
+    String key = String("m") + String(i);
+    if (server_.hasArg(key)) mm |= (1u<<i);
+  }
+  for (int j=0;j<numS;j++){
+    String key = String("s") + String(j);
+    if (server_.hasArg(key)) sm |= (1u<<j);
+  }
+  rs.mainsMask = mm;
+  rs.secsMask  = sm;
+
+  if (idx >= 0 && idx < (int)st.size()) {
+    // update
+    st[idx] = rs;
+  } else {
+    // add
+    st.push_back(rs);
+  }
+
+  bool ok = setStates_(st);
+  server_.sendHeader(F("Location"), "/states");
+  server_.send(302, F("text/plain"), ok ? "ok" : "fail");
+}
+
+void WebUI::handleStatesDelete() {
+  if (!getStates_ || !setStates_) {
+    server_.send(500, F("text/plain"), F("States API no inicializada"));
+    return;
+  }
+  int idx = server_.hasArg("idx") ? server_.arg("idx").toInt() : -1;
+  std::vector<RelayState> st = getStates_();
+  if (idx >= 0 && idx < (int)st.size()) {
+    st.erase(st.begin() + idx);
+    (void)setStates_(st);
+  }
+  server_.sendHeader(F("Location"), "/states");
+  server_.send(302, F("text/plain"), "");
 }

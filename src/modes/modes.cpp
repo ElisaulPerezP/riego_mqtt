@@ -3,9 +3,10 @@
 #include "AutoMode.h"
 #include "../hw/PinMap.h"
 #include "../hw/RelayBank.h"
+#include "../schedule/IrrigationSchedule.h"
+#include <vector>
 
-// -------------------- Pines/const de tu implementación original --------------------
-// FULL
+// -------------------- Pines/const originales --------------------
 namespace FULL {
   enum {
     PIN_NEXT              = 13,  // activo LOW
@@ -23,11 +24,10 @@ namespace FULL {
   static const bool SEC_ACTIVE_LOW[]  = {false,false};
   static const int  NUM_SECS          = sizeof(SEC_PINS)/sizeof(SEC_PINS[0]);
 
-  // Secuencia personalizada FULL
   static const int CUSTOM_STATES[] = {
-     15,17,3,1,11,9,7,13,19,5,23,21,  // "b" states
-      8,12,16,                        // "a" states
-      NUM_MAINS*2                     // OFF simbólico al final (no usado explícito)
+     15,17,3,1,11,9,7,13,19,5,23,21,
+      8,12,16,
+      NUM_MAINS*2
   };
   static const int NUM_CUSTOM_STATES = sizeof(CUSTOM_STATES)/sizeof(CUSTOM_STATES[0]);
 
@@ -36,15 +36,14 @@ namespace FULL {
   static const unsigned long STEP_MS       = 500;
 }
 
-// BLINK
 namespace BLINK {
   enum {
     PIN_ALWAYS_ON        = 33,
     PIN_ALWAYS_ON_12     = 12,
     PIN_TOGGLE_NEXT      = 25,
     PIN_TOGGLE_PREV      = 14,
-    PIN_OVR_NEXT         = 13, // override manual (LOW)
-    PIN_OVR_PREV         = 4   // override manual (HIGH)
+    PIN_OVR_NEXT         = 13,
+    PIN_OVR_PREV         = 4
   };
   static const int  MAIN_PINS[]       = {5,18,0,21,17,3,2,22,16,1,15,23};
   static const bool MAIN_ACTIVE_LOW[] = {true,true,true,true,true,true,true,true,true,true,true,true};
@@ -62,7 +61,7 @@ namespace BLINK {
   static const int PIN_FLOW_2 = 35;
 }
 
-// -------------------- Objetos estáticos compartidos --------------------
+// -------------------- Objetos --------------------
 static const PinMap pinmapFull = {
   FULL::MAIN_PINS, FULL::MAIN_ACTIVE_LOW, (int)(sizeof(FULL::MAIN_PINS)/sizeof(int)),
   FULL::SEC_PINS,  FULL::SEC_ACTIVE_LOW,  (int)(sizeof(FULL::SEC_PINS)/sizeof(int)),
@@ -89,9 +88,50 @@ static AutoMode autoMode(relayBlink,
                          BLINK::STATE_MS, BLINK::OFF_MS, BLINK::STEP_MS,
                          BLINK::PIN_FLOW_1, BLINK::PIN_FLOW_2);
 
+// Programa/cali “vivos” dentro de este módulo (que AutoMode referenciará)
+static ProgramSpec     gProg;
+static FlowCalibration gCal;
+static bool            gProgInit = false;
+
+// Por si el loop arranca antes de que el main le pase algo sensato
+static void ensureProgramInit() {
+  if (gProgInit) return;
+  gProg.enabled = true;
+
+  StepSet set0;
+  set0.name = "Default";
+  set0.pauseMsBetweenSteps = 10000; // 10s
+  for (int i=0;i<BLINK::NUM_CUSTOM_STATES;i++) {
+    set0.steps.push_back( StepSpec{ BLINK::CUSTOM_STATES[i], BLINK::STATE_MS, 0 } );
+  }
+  gProg.sets.clear();
+  gProg.sets.push_back(set0);
+
+  uint8_t everyday = (uint8_t)(DOW_MON|DOW_TUE|DOW_WED|DOW_THU|DOW_FRI|DOW_SAT|DOW_SUN);
+  gProg.starts.clear();
+  gProg.starts.push_back( StartSpec(5, 0, everyday, 0, true, 0.80f, 0.70f) );
+  gProg.starts.push_back( StartSpec(17,30, everyday, 0, true, 1.00f, 1.00f) );
+
+  gCal.pulsesPerMl1 = 4.5f;
+  gCal.pulsesPerMl2 = 4.5f;
+
+  autoMode.setSchedule(&gProg, &gCal);
+  gProgInit = true;
+}
+
 // -------------------- Fachada C-like --------------------
 void resetFullMode()  { manualMode.reset(); }
 void runFullMode()    { manualMode.run();   }
 
 void resetBlinkMode() { autoMode.reset();   }
-void runBlinkMode()   { autoMode.run();     }
+void runBlinkMode()   { ensureProgramInit(); autoMode.run(); }
+
+AutoMode::Tele getAutoTelemetry() { return autoMode.telemetry(); }
+
+// NUEVO: el main llama esto tras guardar/editar en WebUI
+void modesSetProgram(const ProgramSpec& p, const FlowCalibration& c) {
+  gProg = p;             // copiamos (vive dentro de este módulo)
+  gCal  = c;
+  gProgInit = true;      // ya tenemos un programa real
+  autoMode.setSchedule(&gProg, &gCal);
+}

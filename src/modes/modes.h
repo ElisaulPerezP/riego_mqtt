@@ -1,9 +1,14 @@
 #pragma once
-#include <Arduino.h>
+#include "AutoMode.h"
+#include "../schedule/IrrigationSchedule.h"
 
-// Mantén tu main viejo si quieres: estas funciones delegan a objetos internos
 void resetFullMode();
 void runFullMode();
 
 void resetBlinkMode();
 void runBlinkMode();
+
+AutoMode::Tele getAutoTelemetry();
+
+// NUEVO: aplicar programa/calibración al AutoMode
+void modesSetProgram(const ProgramSpec& p, const FlowCalibration& c);
