@@ -25,7 +25,7 @@ WiFiManagerESP32 wifi;
 MqttConfig       cfg;
 MqttConfigStore  cfgStore("mqtt");
 MqttChat         chat(cfg.host.c_str(), cfg.port, cfg.user.c_str(), cfg.pass.c_str(), cfg.topic.c_str());
-LineReader       reader(Serial);
+LineReader       reader(&Serial);      // <<<<<< CORREGIDO: ctor con puntero
 MqttMenuController* mqttCtl = nullptr;
 
 // Anexo bajo el menú Wi-Fi
@@ -44,7 +44,7 @@ static void showRootMenusOnce() {
 static void safeShowMenusTwice() {
   showRootMenusOnce();
   delay(250);
-  showRootMenusOnce();
+  showRootMenusOnce();   // <<<<<< CORREGIDO: no existe showRootMenusTwice()
 }
 
 void setup() {
@@ -78,7 +78,7 @@ void setup() {
   static MqttMenuController ctl(Serial, reader, cfg, cfgStore, chat);
   mqttCtl = &ctl;
 
-  // Menús raíz
+  // Menús raíz (doble impresión por robustez del monitor serie)
   safeShowMenusTwice();
 }
 

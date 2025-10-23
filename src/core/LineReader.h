@@ -1,32 +1,16 @@
 #pragma once
 #include <Arduino.h>
 
-// Lector de líneas no bloqueante para un Stream (Serial).
-// Entrega también líneas vacías (Enter) e ignora CRLF/LFCR dobles.
 class LineReader {
 public:
-  explicit LineReader(Stream& io) : io_(io) {}
+  explicit LineReader(HardwareSerial* s = &Serial) : io_(s) {}
 
-  // Devuelve true cuando completa una línea (incluyendo vacías).
-  bool poll(String& out, size_t maxLen = 512) {
-    while (io_.available()) {
-      char c = (char)io_.read();
-      if (c == '\r' || c == '\n') {
-        // Swallow CRLF / LFCR
-        if (io_.available()) {
-          int p = io_.peek();
-          if ((c == '\r' && p == '\n') || (c == '\n' && p == '\r')) (void)io_.read();
-        }
-        out = buf_;
-        buf_ = "";
-        return true;
-      }
-      if (isPrintable(c) && buf_.length() < maxLen) buf_ += c;
-    }
-    return false;
-  }
+  // Lee una línea de forma no bloqueante. Devuelve true si entregó una.
+  bool poll(String& out, size_t maxLen = 512);
+
+  void setStream(HardwareSerial* s) { io_ = s; }
 
 private:
-  Stream& io_;
-  String  buf_;
+  HardwareSerial* io_ = &Serial;
+  String buf_;
 };
