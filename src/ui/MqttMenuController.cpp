@@ -30,13 +30,15 @@ void MqttMenuController::printMenu() {
   io_.println(F("[h] Host/puerto"));
   io_.println(F("[u] Usuario"));
   io_.println(F("[p] Contraseña"));
-  io_.println(F("[t] Tópico"));
+  io_.println(F("[t] Tópico (publicación)"));
+  io_.println(F("[l] Tópico suscripción"));   // NUEVO
   io_.println(F("[c] Chat MQTT"));
   io_.println(F("[s] Estado"));
   io_.println(F("[e] Volver al menú Wi-Fi"));
   io_.println(F("---------------------"));
-  io_.printf("broker: %s:%u  user: %s  topic: %s\n",
-             cfg_.host.c_str(), cfg_.port, cfg_.user.c_str(), cfg_.topic.c_str());
+  io_.printf("broker: %s:%u  user: %s  pub: %s  sub: %s\n",
+             cfg_.host.c_str(), cfg_.port, cfg_.user.c_str(),
+             cfg_.topic.c_str(), cfg_.subTopic.c_str());
 }
 
 void MqttMenuController::printPrompt(const char* p) {
@@ -49,10 +51,11 @@ void MqttMenuController::printChatMenu() {
   io_.println(F("----- CHAT MQTT -----"));
   io_.println(F("Comandos:"));
   io_.println(F("  /m        -> pedir mensaje y publicar"));
-  io_.println(F("  /s        -> estado MQTT/WiFi/tópico"));
+  io_.println(F("  /s        -> estado MQTT/WiFi/tópicos"));
   io_.println(F("  /e        -> salir al menú MQTT"));
   io_.println(F("  (cualquier otra línea se publica tal cual)"));
-  io_.print  (F("Topic actual: ")); io_.println(cfg_.topic);
+  io_.print  (F("Topic (pub): ")); io_.println(cfg_.topic);
+  io_.print  (F("Topic (sub): ")); io_.println(cfg_.subTopic);
   io_.println(F("---------------------"));
 }
 
@@ -107,7 +110,16 @@ void MqttMenuController::handleLine(const String& line) {
       if (line != "/k" && line.length()) cfg_.topic = line;
       chat_.setTopic(cfg_.topic);
       store_.save(cfg_);
-      io_.printf("[mqtt] topic -> %s\n", cfg_.topic.c_str());
+      io_.printf("[mqtt] topic(pub) -> %s\n", cfg_.topic.c_str());
+      st_ = State::Menu;
+      printPrompt();
+      return;
+    }
+    case State::EditSubTopic: {   // NUEVO
+      if (line != "/k" && line.length()) cfg_.subTopic = line;
+      chat_.setSubTopic(cfg_.subTopic);
+      store_.save(cfg_);
+      io_.printf("[mqtt] topic(sub) -> %s\n", cfg_.subTopic.c_str());
       st_ = State::Menu;
       printPrompt();
       return;
@@ -157,9 +169,14 @@ void MqttMenuController::handleLine(const String& line) {
           st_ = State::EditPass;
           return;
         case 't': case 'T':
-          io_.printf("Tópico actual: %s\n", cfg_.topic.c_str());
+          io_.printf("Tópico (pub) actual: %s\n", cfg_.topic.c_str());
           io_.print  (F("Nuevo tópico o /k para mantener: "));
           st_ = State::EditTopic;
+          return;
+        case 'l': case 'L': // NUEVO
+          io_.printf("Tópico (sub) actual: %s\n", cfg_.subTopic.c_str());
+          io_.print  (F("Nuevo tópico o /k para mantener: "));
+          st_ = State::EditSubTopic;
           return;
         case 's': case 'S':
           io_.println(chat_.status());
@@ -168,6 +185,15 @@ void MqttMenuController::handleLine(const String& line) {
         case 'c': case 'C':
           io_.println();
           st_ = State::ChatMenu;
+
+          // Al entrar al chat: engancha handler y suscríbete
+          chat_.onMessage([this](const String& topic, const String& payload){
+            io_.print(F("[mqtt<- ")); io_.print(topic); io_.print(F("] "));
+            io_.println(payload);
+          });
+          chat_.setSubTopic(cfg_.subTopic);
+          chat_.subscribe();
+
           printChatMenu();
           printChatPrompt();
           return;
@@ -198,6 +224,8 @@ void MqttMenuController::handleLine(const String& line) {
       return;
     }
     if (line == "/e" || line == "/E") {
+      // Al salir del chat, desuscribirse
+      chat_.unsubscribe();
       st_ = State::Menu;
       printPrompt();
       return;

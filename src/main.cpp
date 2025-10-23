@@ -25,7 +25,7 @@ WiFiManagerESP32 wifi;
 MqttConfig       cfg;
 MqttConfigStore  cfgStore("mqtt");
 MqttChat         chat(cfg.host.c_str(), cfg.port, cfg.user.c_str(), cfg.pass.c_str(), cfg.topic.c_str());
-LineReader       reader(&Serial);      // <<<<<< CORREGIDO: ctor con puntero
+LineReader       reader(&Serial);
 MqttMenuController* mqttCtl = nullptr;
 
 // Anexo bajo el menú Wi-Fi
@@ -44,7 +44,7 @@ static void showRootMenusOnce() {
 static void safeShowMenusTwice() {
   showRootMenusOnce();
   delay(250);
-  showRootMenusOnce();   // <<<<<< CORREGIDO: no existe showRootMenusTwice()
+  showRootMenusOnce();
 }
 
 void setup() {
@@ -72,6 +72,7 @@ void setup() {
   chat.setServer(cfg.host, cfg.port);
   chat.setAuth(cfg.user, cfg.pass);
   chat.setTopic(cfg.topic);
+  chat.setSubTopic(cfg.subTopic);   // NUEVO
   chat.begin();
 
   // Crear controller del menú MQTT
@@ -111,7 +112,7 @@ void loop() {
       printMqttAnnex();
     }
 
-    // Mantén MQTT vivo aunque no estés en el menú (para status / chat inmediato)
+    // Mantén MQTT vivo aunque no estés en el menú
     if (wifi.isConnected()) chat.loop();
 
     delay(2);

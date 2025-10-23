@@ -13,7 +13,8 @@ public:
     EditPort,
     EditUser,
     EditPass,
-    EditTopic,
+    EditTopic,      // publicación
+    EditSubTopic,   // suscripción (nuevo)
     ChatMenu,
     ChatWaitMsg
   };
