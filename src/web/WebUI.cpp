@@ -18,7 +18,7 @@ void WebUI::begin() {
   server_.on("/mqtt/publish",   HTTP_POST, [this]{ handleMqttPublish(); });
   server_.on("/mqtt/poll",      HTTP_GET,  [this]{ handleMqttPoll(); });
 
-  // Irrigación (status/json)
+  // Riego (placeholder)
   server_.on("/riego",          HTTP_GET,  [this]{ handleIrrigation(); });
   server_.on("/riego.json",     HTTP_GET,  [this]{ handleIrrigationJson(); });
 
@@ -26,6 +26,10 @@ void WebUI::begin() {
   server_.on("/states",         HTTP_GET,  [this]{ handleStatesList(); });
   server_.on("/states/save",    HTTP_POST, [this]{ handleStatesSave(); });
   server_.on("/states/delete",  HTTP_POST, [this]{ handleStatesDelete(); });
+
+  // ====== DETALLE DE ZONA ======
+  server_.on("/states/edit",        HTTP_GET,  [this]{ handleStateEdit();      });
+  server_.on("/states/edit/save",   HTTP_POST, [this]{ handleStateEditSave();  });
 
   server_.onNotFound([this]{ server_.send(404, F("text/plain"), F("404")); });
 
@@ -106,6 +110,98 @@ bool WebUI::setAutoIndex(int idx) {
   autoIdx_ = idx; return persistSaved();
 }
 
+/* ====================== Persistencia Zonas ====================== */
+bool WebUI::loadZoneParams(int idx, ZoneParams& out) {
+  if (idx < 0) return false;
+  Preferences p;
+  if (!p.begin(NS_ZONES, true)) return false;
+  String base = String("z") + String(idx) + "_";
+  out.volumeMl = p.getUInt((base + "vol").c_str(), 0);
+  out.timeMs   = p.getUInt((base + "time").c_str(), 0);
+  out.fert1Pct = p.getUChar((base + "f1").c_str(), 0);
+  out.fert2Pct = p.getUChar((base + "f2").c_str(), 0);
+  p.end();
+  return true;
+}
+
+bool WebUI::saveZoneParams(int idx, const ZoneParams& z) {
+  if (idx < 0) return false;
+  Preferences p;
+  if (!p.begin(NS_ZONES, false)) return false;
+  String base = String("z") + String(idx) + "_";
+  p.putUInt ((base + "vol").c_str(),  z.volumeMl);
+  p.putUInt ((base + "time").c_str(), z.timeMs);
+  p.putUChar((base + "f1").c_str(),   z.fert1Pct);
+  p.putUChar((base + "f2").c_str(),   z.fert2Pct);
+  // asegurar contador >= idx+1
+  int count = p.getInt("count", 0);
+  if (idx + 1 > count) p.putInt("count", idx + 1);
+  p.end();
+  return true;
+}
+
+bool WebUI::deleteZoneParams(int idx) {
+  if (idx < 0) return false;
+  Preferences p;
+  if (!p.begin(NS_ZONES, false)) return false;
+  String base = String("z") + String(idx) + "_";
+  p.remove((base + "vol").c_str());
+  p.remove((base + "time").c_str());
+  p.remove((base + "f1").c_str());
+  p.remove((base + "f2").c_str());
+  p.end();
+  return true;
+}
+
+int WebUI::getZonesCount() {
+  Preferences p;
+  if (!p.begin(NS_ZONES, true)) return 0;
+  int c = p.getInt("count", 0);
+  p.end();
+  return c;
+}
+
+void WebUI::setZonesCount(int count) {
+  Preferences p;
+  if (!p.begin(NS_ZONES, false)) return;
+  p.putInt("count", count < 0 ? 0 : count);
+  p.end();
+}
+
+void WebUI::compactZonesAfterDelete(int deletedIdx, int newCount) {
+  if (deletedIdx < 0) return;
+  Preferences p;
+  if (!p.begin(NS_ZONES, false)) return;
+
+  // Mover z(k+1)->z(k) desde deletedIdx hasta newCount-1
+  for (int k = deletedIdx; k < newCount; ++k) {
+    // cargar origen k+1
+    String src = String("z") + String(k+1) + "_";
+    uint32_t vol  = p.getUInt ((src + "vol").c_str(),  0);
+    uint32_t time = p.getUInt ((src + "time").c_str(), 0);
+    uint8_t  f1   = p.getUChar((src + "f1").c_str(),   0);
+    uint8_t  f2   = p.getUChar((src + "f2").c_str(),   0);
+
+    // guardar en destino k
+    String dst = String("z") + String(k) + "_";
+    p.putUInt ((dst + "vol").c_str(),  vol);
+    p.putUInt ((dst + "time").c_str(), time);
+    p.putUChar((dst + "f1").c_str(),   f1);
+    p.putUChar((dst + "f2").c_str(),   f2);
+  }
+
+  // limpiar el último (newCount)
+  String last = String("z") + String(newCount) + "_";
+  p.remove((last + "vol").c_str());
+  p.remove((last + "time").c_str());
+  p.remove((last + "f1").c_str());
+  p.remove((last + "f2").c_str());
+
+  // actualizar contador
+  p.putInt("count", newCount);
+  p.end();
+}
+
 /* ================================== HTML helpers ================================== */
 String WebUI::htmlHeader(const String& title) const {
   String ipSTA = (uint32_t)WiFi.localIP()   ? WiFi.localIP().toString()   : F("(sin IP)");
@@ -114,7 +210,15 @@ String WebUI::htmlHeader(const String& title) const {
   s += F("<!doctype html><html><head><meta charset='utf-8'>");
   s += F("<meta name='viewport' content='width=device-width, initial-scale=1'>");
   s += F("<title>"); s += title; s += F("</title>");
-  s += F("<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:16px}code,pre{background:#f4f4f4;padding:2px 4px;border-radius:4px}table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px}input[type=checkbox]{transform:scale(1.2)} .rowform{display:inline} </style>");
+  s += F("<style>"
+        "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:16px}"
+        "code,pre{background:#f4f4f4;padding:2px 4px;border-radius:4px}"
+        "table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px}"
+        "input[type=checkbox]{transform:scale(1.2)} .rowform{display:inline}"
+        ".btn{padding:6px 10px;border:1px solid #ccc;border-radius:6px;background:#fafafa;cursor:pointer}"
+        ".btn-link{border:none;background:none;color:#06c;text-decoration:underline;cursor:pointer}"
+        ".formcard{border:1px solid #ddd;border-radius:8px;padding:12px;margin:8px 0;background:#fff}"
+        "</style>");
   s += F("</head><body>");
   s += F("<h2>Riego ESP32 - WebUI</h2>");
   s += F("<p>AP: <b>config</b> · mDNS: <a href='http://config.local/'>config.local</a></p>");
@@ -358,7 +462,7 @@ void WebUI::pushMsg_(const String& t, const String& p) {
   if (used_ < MSG_BUF) used_++;
 }
 
-/* ===================== Irrigación (status) ===================== */
+/* ===================== Riego (placeholder) ===================== */
 void WebUI::handleIrrigation() {
   String s = htmlHeader(F("Riego"));
   s += F("<h3>Estado (resumen)</h3>");
@@ -372,7 +476,7 @@ void WebUI::handleIrrigationJson() {
   server_.send(200, F("application/json"), out);
 }
 
-/* ===================== ESTADOS (nuevo) ===================== */
+/* ===================== ESTADOS (tabla) ===================== */
 void WebUI::handleStatesList() {
   if (!getStates_ || !getCounts_) {
     server_.send(500, F("text/plain"), F("States API no inicializada"));
@@ -382,6 +486,9 @@ void WebUI::handleStatesList() {
   std::pair<int,int> counts = getCounts_();
   int numM = counts.first;
   int numS = counts.second;
+
+  // Sincroniza contador de zonas con número de estados
+  setZonesCount((int)st.size());
 
   String s = htmlHeader(F("Estados"));
   s += F("<h3>Estados de relés</h3>");
@@ -431,11 +538,13 @@ void WebUI::handleStatesList() {
       s += F(">");
     }
 
-    s += F("</td><td><button>Guardar</button> ");
-    s += F("</form>");
+    s += F("</td><td>");
+    s += F("<button class='btn'>Guardar</button> ");
+    s += F("</form> ");
+    s += F("<a class='btn' href='/states/edit?idx="); s += String((int)r); s += F("'>Configurar</a> ");
     s += F("<form class='rowform' method='post' action='/states/delete' onsubmit='return confirm(\"¿Eliminar estado? \")'>");
     s += F("<input type='hidden' name='idx' value='"); s += String((int)r); s += F("'>");
-    s += F("<button>Eliminar</button></form>");
+    s += F("<button class='btn'>Eliminar</button></form>");
     s += F("</td></tr>");
   }
 
@@ -452,7 +561,7 @@ void WebUI::handleStatesList() {
   for (int j=0;j<numS;j++){
     s += F("</td><td><input type='checkbox' name='s"); s += String(j); s += F("'>");
   }
-  s += F("</td><td><button>Agregar</button></td></tr>");
+  s += F("</td><td><button class='btn'>Agregar</button></td></tr>");
   s += F("</form>");
 
   s += F("</table>");
@@ -490,15 +599,21 @@ void WebUI::handleStatesSave() {
   rs.mainsMask = mm;
   rs.secsMask  = sm;
 
+  bool added = false;
   if (idx >= 0 && idx < (int)st.size()) {
-    // update
     st[idx] = rs;
   } else {
-    // add
     st.push_back(rs);
+    added = true;
   }
 
   bool ok = setStates_(st);
+  // sincroniza contador de zonas
+  if (ok) {
+    int newCount = (int)st.size();
+    setZonesCount(newCount);
+    // si se agregó, el detalle tendrá parámetros en 0 por defecto (sin necesidad de guardar).
+  }
   server_.sendHeader(F("Location"), "/states");
   server_.send(302, F("text/plain"), ok ? "ok" : "fail");
 }
@@ -512,8 +627,73 @@ void WebUI::handleStatesDelete() {
   std::vector<RelayState> st = getStates_();
   if (idx >= 0 && idx < (int)st.size()) {
     st.erase(st.begin() + idx);
-    (void)setStates_(st);
+    bool ok = setStates_(st);
+    if (ok) {
+      int newCount = (int)st.size();
+      compactZonesAfterDelete(idx, newCount);
+    }
   }
+  server_.sendHeader(F("Location"), "/states");
+  server_.send(302, F("text/plain"), "");
+}
+
+/* ===================== DETALLE DE ZONA ===================== */
+void WebUI::handleStateEdit() {
+  int idx = server_.hasArg("idx") ? server_.arg("idx").toInt() : -1;
+  if (idx < 0) { server_.send(400, F("text/plain"), F("idx inválido")); return; }
+
+  String zoneName = String("Zona ") + String(idx);
+  if (getStates_) {
+    auto v = getStates_();
+    if (idx >= 0 && idx < (int)v.size() && v[idx].name.length()) zoneName = v[idx].name;
+  }
+
+  ZoneParams zp;
+  loadZoneParams(idx, zp);
+
+  String s = htmlHeader(F("Configurar zona"));
+  s += F("<h3>Configurar zona</h3>");
+  s += F("<div class='formcard'>");
+  s += F("<p><b>Zona:</b> "); s += zoneName; s += F(" <small>(idx ");
+  s += String(idx); s += F(")</small></p>");
+
+  s += F("<form method='post' action='/states/edit/save'>");
+  s += F("<input type='hidden' name='idx' value='"); s += String(idx); s += F("'>");
+
+  s += F("<p>Volumen total: <input type='number' name='vol' min='0' step='1' value='");
+  s += String(zp.volumeMl); s += F("'> mL</p>");
+
+  s += F("<p>Tiempo máximo: <input type='number' name='time' min='0' step='1000' value='");
+  s += String(zp.timeMs); s += F("'> ms</p>");
+
+  s += F("<p>p_fert_1 (0–100%): <input type='range' id='p1r' min='0' max='100' value='");
+  s += String(zp.fert1Pct); s += F("' oninput='p1v.value=this.value'> ");
+  s += F("<input type='number' id='p1v' name='p1' min='0' max='100' value='"); s += String(zp.fert1Pct); s += F("' oninput='p1r.value=this.value'> %</p>");
+
+  s += F("<p>p_fert_2 (0–100%): <input type='range' id='p2r' min='0' max='100' value='");
+  s += String(zp.fert2Pct); s += F("' oninput='p2v.value=this.value'> ");
+  s += F("<input type='number' id='p2v' name='p2' min='0' max='100' value='"); s += String(zp.fert2Pct); s += F("' oninput='p2r.value=this.value'> %</p>");
+
+  s += F("<p><button class='btn'>Guardar</button> ");
+  s += F("<a class='btn' href='/states'>Volver</a></p>");
+  s += F("</form></div>");
+
+  s += htmlFooter();
+  server_.send(200, F("text/html; charset=utf-8"), s);
+}
+
+void WebUI::handleStateEditSave() {
+  int idx = server_.hasArg("idx") ? server_.arg("idx").toInt() : -1;
+  if (idx < 0) { server_.send(400, F("text/plain"), F("idx inválido")); return; }
+
+  ZoneParams z;
+  z.volumeMl = server_.hasArg("vol") ? (uint32_t)strtoul(server_.arg("vol").c_str(), nullptr, 10) : 0;
+  z.timeMs   = server_.hasArg("time")? (uint32_t)strtoul(server_.arg("time").c_str(), nullptr, 10) : 0;
+  z.fert1Pct = server_.hasArg("p1")  ? (uint8_t)constrain(server_.arg("p1").toInt(), 0, 100) : 0;
+  z.fert2Pct = server_.hasArg("p2")  ? (uint8_t)constrain(server_.arg("p2").toInt(), 0, 100) : 0;
+
+  (void)saveZoneParams(idx, z);
+
   server_.sendHeader(F("Location"), "/states");
   server_.send(302, F("text/plain"), "");
 }
