@@ -4,13 +4,14 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <functional>
+#include <utility>
 #include <vector>
 
 #include "../mqtt/MqttChat.h"
 #include "../config/MqttConfig.h"
 #include "../config/MqttConfigStore.h"
-#include "../modes/AutoMode.h"
-#include "../state/RelayState.h"
+#include "../modes/AutoMode.h"          // Define StartSpec / StepSpec
+#include "../state/RelayState.h"        // Define RelayState
 
 class WebUI {
 public:
@@ -26,17 +27,16 @@ public:
   void attachMqttSink();
 
   // ======== API de Schedule ========
-  // Incluye setStarts (actualización masiva de starts).
   void attachScheduleAPI(
-    std::function<bool()>                               getProgramEnabled,
-    std::function<void(bool)>                           setProgramEnabled,
-    std::function<std::vector<StartSpec>()>             getStarts,
-    std::function<bool(const StartSpec&)>               addStart,
-    std::function<bool(unsigned)>                       deleteStart,
-    std::function<std::vector<StepSpec>()>              getSteps,
-    std::function<bool(const std::vector<StepSpec>&)>   setSteps,
-    std::function<String()>                              nowStrProvider,
-    std::function<bool(const std::vector<StartSpec>&)>   setStarts
+    std::function<bool()>                              getProgramEnabled,
+    std::function<void(bool)>                          setProgramEnabled,
+    std::function<std::vector<StartSpec>()>            getStarts,
+    std::function<bool(const StartSpec&)>              addStart,
+    std::function<bool(unsigned)>                      deleteStart,
+    std::function<std::vector<StepSpec>()>             getSteps,
+    std::function<bool(const std::vector<StepSpec>&)>  setSteps,
+    std::function<String()>                            nowStrProvider,
+    std::function<bool(const std::vector<StartSpec>&)> setStartsBulk
   ) {
     getProgramEnabled_ = getProgramEnabled;
     setProgramEnabled_ = setProgramEnabled;
@@ -46,21 +46,29 @@ public:
     getSteps_          = getSteps;
     setSteps_          = setSteps;
     nowStrProvider_    = nowStrProvider;
-    setStarts_         = setStarts;
+    setStartsBulk_     = setStartsBulk;
   }
 
-  // ======== API de ESTADOS (tabla de relés) ========
+  // ======== API de ESTADOS ========
   void attachStateAPI(
     std::function<std::vector<RelayState>()> getter,
     std::function<bool(const std::vector<RelayState>&)> setter,
     std::function<std::pair<int,int>()> counts,
     std::function<String(int,bool)> relayNameGetter = nullptr
   ) {
-    getStates_ = getter;
-    setStates_ = setter;
-    getCounts_ = counts;
+    getStates_       = getter;
+    setStates_       = setter;
+    getCounts_       = counts;
     relayNameGetter_ = relayNameGetter;
   }
+
+  // ----------------- Estructuras públicas útiles -----------------
+  struct ZoneParams {
+    uint32_t volumeMl = 0;
+    uint32_t timeMs   = 0;
+    uint8_t  fert1Pct = 0;
+    uint8_t  fert2Pct = 0;
+  };
 
 private:
   // ---------- Wi-Fi guardadas ----------
@@ -69,7 +77,12 @@ private:
     SavedNet() : open(false) {}
     SavedNet(const String& s, const String& p, bool o) : ssid(s), pass(p), open(o) {}
   };
-  static constexpr const char* NS_WIFI = "wifi_saved";
+
+  // Namespaces de Preferences
+  static constexpr const char* NS_WIFI  = "wifi_saved";
+  static constexpr const char* NS_ZONES = "zones";
+
+  // Máx redes guardadas
   static constexpr int MAX_SAVED = 10;
   SavedNet saved_[MAX_SAVED];
   int savedCount_ = 0;
@@ -82,21 +95,13 @@ private:
   bool deleteSaved(int idx);
   bool setAutoIndex(int idx);
 
-  // ---------- Persistencia de Zona (por índice de estado) ----------
-  struct ZoneParams {
-    uint32_t volumeMl = 0;
-    uint32_t timeMs   = 0;
-    uint8_t  fert1Pct = 0;   // 0..100
-    uint8_t  fert2Pct = 0;   // 0..100
-  };
-  static constexpr const char* NS_ZONES = "zones";
-
+  // ---------- Persistencia de parámetros por zona ----------
   bool loadZoneParams(int idx, ZoneParams& out);
   bool saveZoneParams(int idx, const ZoneParams& z);
   bool deleteZoneParams(int idx);
   int  getZonesCount();
   void setZonesCount(int count);
-  void compactZonesAfterDelete(int deletedIdx, int newCount); // mueve idx+1..N-1 hacia arriba
+  void compactZonesAfterDelete(int deletedIdx, int newCount);
 
   // ---------- MQTT sink buffer ----------
   struct Msg {
@@ -128,19 +133,32 @@ private:
   void handleMqttPublish();
   void handleMqttPoll();
 
-  // Irrigación / Telemetría (placeholder)
+  // Riego / Telemetría (placeholder)
   void handleIrrigation();
   void handleIrrigationJson();
 
-  // ======== ESTADOS (tabla principal) ========
+  // ESTADOS (tabla)
   void handleStatesList();
   void handleStatesSave();
   void handleStatesDelete();
 
-  // ======== DETALLE DE ZONA ========
-  void handleStateEdit();       // GET /states/edit?idx=N
-  void handleStateEditSave();   // POST /states/edit/save
+  // DETALLE DE ZONA
+  void handleStateEdit();
+  void handleStateEditSave();
 
+  // ======= Programación (/sched) =======
+  void handleSched();                 // vista principal de programación
+  void handleSchedEnable();           // activar/desactivar programa
+  void handleSchedAddStart();         // añadir un horario
+  void handleSchedDeleteStart();      // eliminar un horario
+  void handleSchedSaveStarts();       // guardar tabla completa (bulk)
+
+  // Pasos (/sched/steps)
+  void handleStepsPage();             // vista de pasos (StepSet 0)
+  void handleStepsSave();             // guardar pasos
+
+  void handleMode();
+  void handleModeSet();
 private:
   WebServer&        server_;
   MqttChat&         chat_;
@@ -148,15 +166,15 @@ private:
   MqttConfigStore&  cfgStore_;
 
   // Schedule API
-  std::function<bool()>                                getProgramEnabled_;
-  std::function<void(bool)>                            setProgramEnabled_;
-  std::function<std::vector<StartSpec>()>              getStarts_;
-  std::function<bool(const StartSpec&)>                addStart_;
-  std::function<bool(unsigned)>                        deleteStart_;
-  std::function<std::vector<StepSpec>()>               getSteps_;
-  std::function<bool(const std::vector<StepSpec>&)>    setSteps_;
-  std::function<String()>                              nowStrProvider_;
-  std::function<bool(const std::vector<StartSpec>&)>   setStarts_;
+  std::function<bool()>                              getProgramEnabled_;
+  std::function<void(bool)>                          setProgramEnabled_;
+  std::function<std::vector<StartSpec>()>            getStarts_;
+  std::function<bool(const StartSpec&)>              addStart_;
+  std::function<bool(unsigned)>                      deleteStart_;
+  std::function<std::vector<StepSpec>()>             getSteps_;
+  std::function<bool(const std::vector<StepSpec>&)>  setSteps_;
+  std::function<String()>                            nowStrProvider_;
+  std::function<bool(const std::vector<StartSpec>&)> setStartsBulk_;
 
   // States API
   std::function<std::vector<RelayState>()>             getStates_;

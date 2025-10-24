@@ -1,6 +1,7 @@
 // File: src/web/WebUI.cpp
 #include "web/WebUI.h"
 #include <WiFi.h>
+#include <Preferences.h>  // <-- NUEVO para /mode (persistencia)
 
 // =================== Rutas ===================
 void WebUI::begin() {
@@ -17,6 +18,10 @@ void WebUI::begin() {
   server_.on("/mqtt/set",       HTTP_POST, [this]{ handleMqttSet(); });
   server_.on("/mqtt/publish",   HTTP_POST, [this]{ handleMqttPublish(); });
   server_.on("/mqtt/poll",      HTTP_GET,  [this]{ handleMqttPoll(); });
+
+  // ====== MODO (Manual/Auto con override software) ======
+  server_.on("/mode",           HTTP_GET,  [this]{ handleMode(); });
+  server_.on("/mode/set",       HTTP_POST, [this]{ handleModeSet(); });
 
   // Riego (placeholder)
   server_.on("/riego",          HTTP_GET,  [this]{ handleIrrigation(); });
@@ -224,7 +229,8 @@ String WebUI::htmlHeader(const String& title) const {
   s += F("<p>AP: <b>config</b> · mDNS: <a href='http://config.local/'>config.local</a></p>");
   s += F("<p>IP AP: <code>");  s += ipAP;  s += F("</code><br>");
   s += F("IP LAN (STA): <code>"); s += ipSTA; s += F("</code></p>");
-  s += F("<nav><a href='/'>Home</a> · <a href='/states'>Estados</a> · <a href='/wifi/info'>WiFi</a> · <a href='/wifi/scan'>Escanear</a> · <a href='/wifi/saved'>Guardadas</a> · <a href='/mqtt'>MQTT</a></nav><hr/>");
+  // ***** NAV: añade "Modo" *****
+  s += F("<nav><a href='/'>Home</a> · <a href='/states'>Estados</a> · <a href='/mode'>Modo</a> · <a href='/wifi/info'>WiFi</a> · <a href='/wifi/scan'>Escanear</a> · <a href='/wifi/saved'>Guardadas</a> · <a href='/mqtt'>MQTT</a></nav><hr/>");
   return s;
 }
 String WebUI::htmlFooter() const {
@@ -244,6 +250,7 @@ void WebUI::handleRoot() {
   String s = htmlHeader(F("Home"));
   s += F("<p>Este servidor reemplaza el menú por Serial. Conéctate al AP <b>config</b> (pass <code>password</code>) y abre <a href='http://config.local/'>config.local</a>.</p>");
   s += F("<ul><li><a href='/states'>Estados (ver/editar/agregar)</a></li>");
+  s += F("<li><a href='/mode'>Modo (Manual/Automático)</a></li>");
   s += F("<li><a href='/wifi/info'>Estado Wi-Fi</a></li>");
   s += F("<li><a href='/wifi/scan'>Escanear y conectar</a></li>");
   s += F("<li><a href='/wifi/saved'>Redes guardadas / autoconexión</a></li>");
@@ -695,5 +702,53 @@ void WebUI::handleStateEditSave() {
   (void)saveZoneParams(idx, z);
 
   server_.sendHeader(F("Location"), "/states");
+  server_.send(302, F("text/plain"), "");
+}
+
+/* ===================== MODO (UI + persistencia) ===================== */
+static const char* NS_MODE = "mode";
+
+void WebUI::handleMode() {
+  Preferences p;
+  bool ovr = false;
+  bool manual = false;
+  if (p.begin(NS_MODE, /*ro*/ true)) {
+    ovr    = p.getUChar("ovr", 0) != 0;
+    manual = p.getUChar("manual", 0) != 0;
+    p.end();
+  }
+
+  String s = htmlHeader(F("Modo"));
+  s += F("<h3>Modo de operación</h3>");
+  s += F("<p>Si activas el <b>override por software</b>, el equipo ignorará el interruptor físico y usará el modo elegido aquí.</p>");
+  s += F("<form class='formcard' method='post' action='/mode/set'>");
+  s += F("<p><label><input type='checkbox' name='ovr' "); if (ovr) s += F("checked"); s += F("> Activar override por software</label></p>");
+
+  s += F("<p>Modo con override:&nbsp; "
+         "<label><input type='radio' name='mode' value='auto' "); if (!manual) s += F("checked"); s += F("> Automático</label>&nbsp; "
+         "<label><input type='radio' name='mode' value='manual' "); if (manual) s += F("checked"); s += F("> Manual</label></p>");
+
+  s += F("<p><button class='btn'>Guardar</button></p>");
+  s += F("</form>");
+
+  s += htmlFooter();
+  server_.send(200, F("text/html; charset=utf-8"), s);
+}
+
+void WebUI::handleModeSet() {
+  bool ovr = server_.hasArg("ovr");
+  bool manual = false;
+  if (server_.hasArg("mode")) {
+    String m = server_.arg("mode");
+    manual = (m == "manual");
+  }
+
+  Preferences p;
+  if (p.begin(NS_MODE, /*ro*/ false)) {
+    p.putUChar("ovr",    ovr ? 1 : 0);
+    p.putUChar("manual", manual ? 1 : 0);
+    p.end();
+  }
+  server_.sendHeader(F("Location"), "/mode");
   server_.send(302, F("text/plain"), "");
 }

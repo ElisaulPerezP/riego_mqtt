@@ -16,7 +16,7 @@
 
 #include "modes/modes.h"                // resetFullMode/runFullMode/resetBlinkMode/runBlinkMode
 #include "schedule/IrrigationSchedule.h"
-#include "state/RelayState.h"           // <-- para la State API (catálogo de estados)
+#include "state/RelayState.h"           // catálogo de estados (RelayState)
 
 // =================== CONFIG BÁSICA ===================
 #ifndef SERIAL_BAUD
@@ -58,7 +58,7 @@ static IrrigationConfig gIrrCfg;   // tz, program (starts + sets[0].steps), flow
 // ===== Catálogo de ESTADOS (persistente) =====
 static Preferences statesPrefs;
 static std::vector<RelayState> gStates;       // Estados visibles/editables en /states
-static constexpr int HW_NUM_MAINS = 12;       // Conteo HW (coincide con tu arreglo FULL/BLINK)
+static constexpr int HW_NUM_MAINS = 12;       // Ajusta si tu HW cambia
 static constexpr int HW_NUM_SECS  = 2;
 
 // =================== HELPERS: Tiempo ===================
@@ -110,7 +110,7 @@ static bool saveIrrConfig(const IrrigationConfig& c) {
 
     irrPrefs.putUChar("p_cnt", (uint8_t)min<size_t>(s0.steps.size(), 40));
     for (size_t i=0; i<min<size_t>(s0.steps.size(), 40); ++i) {
-      irrPrefs.putInt ((String("p")+i+"_idx").c_str(), s0.steps[i].idx);
+      irrPrefs.putInt ((String("p")+i+"_idx").c_str(), s0.steps[i].idx);          // idx = índice de estado del catálogo
       irrPrefs.putUInt((String("p")+i+"_dur").c_str(), s0.steps[i].maxDurationMs);
       irrPrefs.putUInt((String("p")+i+"_ml").c_str(),  s0.steps[i].targetMl);
     }
@@ -155,7 +155,7 @@ static bool loadIrrConfig(IrrigationConfig& out) {
   uint8_t pc = irrPrefs.getUChar("p_cnt", 0);
   for (uint8_t i=0; i<pc; ++i) {
     StepSpec stp;
-    stp.idx           = irrPrefs.getInt ((String("p")+i+"_idx").c_str(), 0);              // ahora idx = índice de estado (catálogo)
+    stp.idx           = irrPrefs.getInt ((String("p")+i+"_idx").c_str(), 0);              // idx = índice de estado (catálogo)
     stp.maxDurationMs = irrPrefs.getUInt((String("p")+i+"_dur").c_str(), 5UL*60UL*1000UL);
     stp.targetMl      = irrPrefs.getUInt((String("p")+i+"_ml").c_str(),  0);
     s0.steps.push_back(stp);
@@ -184,7 +184,7 @@ static void ensureIrrDefaults(IrrigationConfig& c) {
   StepSet s0;
   s0.name = "Default";
   s0.pauseMsBetweenSteps = 10000; // 10 s
-  // Tres ejemplos (se corresponden con estados 0,1,2 que creamos abajo en defaults de estados)
+  // Tres ejemplos (se corresponden con estados 0,1,2 creados en defaults de estados)
   s0.steps.push_back(StepSpec{0, 5UL*60UL*1000UL, 0}); // usa estado #0
   s0.steps.push_back(StepSpec{1, 5UL*60UL*1000UL, 0}); // usa estado #1
   s0.steps.push_back(StepSpec{2, 5UL*60UL*1000UL, 0}); // usa estado #2
@@ -232,7 +232,6 @@ static bool saveRelayStates(const std::vector<RelayState>& v) {
 }
 
 // Defaults del catálogo de estados si está vacío.
-// Crea 3 estados de ejemplo con distintos mains para que /states tenga algo inicial.
 static void ensureStateDefaults(std::vector<RelayState>& out) {
   if (!out.empty()) return;
   out.clear();
@@ -241,7 +240,7 @@ static void ensureStateDefaults(std::vector<RelayState>& out) {
     a.name = "Zona 1";
     a.alwaysOn = true; a.alwaysOn12 = true;
     a.mainsMask = (1u << 0);  // M0 ON
-    a.secsMask  = (1u << 0);  // S0 ON (si aplica)
+    a.secsMask  = (1u << 0);  // S0 ON
     out.push_back(a);
   }
   {
@@ -411,7 +410,7 @@ void setup() {
   startApAndMdns();
 
   // Task de riego (core 0, prioridad baja)
-  xTaskCreatePinnedToCore(irrigationTask, "irrigationTask", 6144, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(irrigationTask, "irrigationTask", 6144, nullptr, 1, &gIrrigationTask, 0);
 }
 
 void loop() {
