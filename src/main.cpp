@@ -61,6 +61,11 @@ static std::vector<RelayState> gStates;       // Estados visibles/editables en /
 static constexpr int HW_NUM_MAINS = 12;       // Ajusta si tu HW cambia
 static constexpr int HW_NUM_SECS  = 2;
 
+// ===== Override de modo (persistente, usado por /mode en WebUI) =====
+static const char* NS_MODE = "mode";
+static bool gOvrEnabled = false;   // si true, ignora el switch físico
+static bool gOvrManual  = false;   // si gOvrEnabled, true=Manual, false=Auto
+
 // =================== HELPERS: Tiempo ===================
 static String nowString() {
   time_t now = time(nullptr);
@@ -69,6 +74,39 @@ static String nowString() {
   char buf[64];
   strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %Z", &tm);
   return String(buf);
+}
+
+// =================== HELPERS: Wi-Fi ===================
+static bool tryAutoConnectFromPrefs() {
+  Preferences p;
+  if (!p.begin("wifi_saved", /*ro*/ true)) return false;
+
+  int count   = p.getInt("count", 0);
+  int autoIdx = p.getInt("auto_idx", -1);
+  if (autoIdx < 0 || autoIdx >= count) { p.end(); return false; }
+
+  String base = String("n") + String(autoIdx) + "_";
+  String ssid = p.getString((base + "ssid").c_str(), "");
+  String pass = p.getString((base + "pass").c_str(), "");
+  bool   open = p.getBool   ((base + "open").c_str(), false);
+  p.end();
+
+  if (!ssid.length()) return false;
+
+  WiFi.persistent(true);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setAutoConnect(true);
+  WiFi.setAutoReconnect(true);
+  // WiFi.setSleep(false); // si quieres evitar ahorro de energía
+
+  if (open) WiFi.begin(ssid.c_str());
+  else      WiFi.begin(ssid.c_str(), pass.c_str());
+
+  // En este core devuelve uint8_t; úsalo como entero.
+  int r = WiFi.waitForConnectResult(6000);
+  Serial.printf("[WiFi] AutoConnect '%s' -> %d, IP=%s\n",
+                ssid.c_str(), r, WiFi.localIP().toString().c_str());
+  return (r == WL_CONNECTED);
 }
 
 // =================== HELPERS: Persistencia (Irrigation) ===================
@@ -94,7 +132,7 @@ static bool saveIrrConfig(const IrrigationConfig& c) {
     irrPrefs.putFloat((String("st")+i+"_vs").c_str(), st.volumeScale);
   }
 
-  // Guardar sólo el StepSet 0 (la WebUI actual edita ese set)
+  // Guardar sólo el StepSet 0
   uint8_t setCnt = (uint8_t)max<size_t>(1, c.program.sets.size());
   irrPrefs.putUChar("set_cnt", setCnt);
 
@@ -110,7 +148,7 @@ static bool saveIrrConfig(const IrrigationConfig& c) {
 
     irrPrefs.putUChar("p_cnt", (uint8_t)min<size_t>(s0.steps.size(), 40));
     for (size_t i=0; i<min<size_t>(s0.steps.size(), 40); ++i) {
-      irrPrefs.putInt ((String("p")+i+"_idx").c_str(), s0.steps[i].idx);          // idx = índice de estado del catálogo
+      irrPrefs.putInt ((String("p")+i+"_idx").c_str(), s0.steps[i].idx);
       irrPrefs.putUInt((String("p")+i+"_dur").c_str(), s0.steps[i].maxDurationMs);
       irrPrefs.putUInt((String("p")+i+"_ml").c_str(),  s0.steps[i].targetMl);
     }
@@ -146,7 +184,7 @@ static bool loadIrrConfig(IrrigationConfig& out) {
 
   // SETS (sólo set 0)
   out.program.sets.clear();
-  (void)irrPrefs.getUChar("set_cnt", 1); // por ahora sólo usamos el 0
+  (void)irrPrefs.getUChar("set_cnt", 1);
 
   StepSet s0;
   s0.name = irrPrefs.getString("set0_name", "Default");
@@ -155,7 +193,7 @@ static bool loadIrrConfig(IrrigationConfig& out) {
   uint8_t pc = irrPrefs.getUChar("p_cnt", 0);
   for (uint8_t i=0; i<pc; ++i) {
     StepSpec stp;
-    stp.idx           = irrPrefs.getInt ((String("p")+i+"_idx").c_str(), 0);              // idx = índice de estado (catálogo)
+    stp.idx           = irrPrefs.getInt ((String("p")+i+"_idx").c_str(), 0);
     stp.maxDurationMs = irrPrefs.getUInt((String("p")+i+"_dur").c_str(), 5UL*60UL*1000UL);
     stp.targetMl      = irrPrefs.getUInt((String("p")+i+"_ml").c_str(),  0);
     s0.steps.push_back(stp);
@@ -173,31 +211,22 @@ static void ensureIrrDefaults(IrrigationConfig& c) {
 
   c.program.enabled = true;
 
-  // Horarios por defecto: 05:00 y 17:30 todos los días, set 0, escalas 1.0
   uint8_t everyday = (DOW_MON|DOW_TUE|DOW_WED|DOW_THU|DOW_FRI|DOW_SAT|DOW_SUN);
   c.program.starts.clear();
   c.program.starts.push_back(StartSpec(5,  0, everyday, 0, true, 1.00f, 1.00f));
   c.program.starts.push_back(StartSpec(17,30, everyday, 0, true, 1.00f, 1.00f));
 
-  // StepSet 0 inicial (los índices de steps apuntan a estados del catálogo gStates)
   c.program.sets.clear();
   StepSet s0;
   s0.name = "Default";
   s0.pauseMsBetweenSteps = 10000; // 10 s
-  // Tres ejemplos (se corresponden con estados 0,1,2 creados en defaults de estados)
-  s0.steps.push_back(StepSpec{0, 5UL*60UL*1000UL, 0}); // usa estado #0
-  s0.steps.push_back(StepSpec{1, 5UL*60UL*1000UL, 0}); // usa estado #1
-  s0.steps.push_back(StepSpec{2, 5UL*60UL*1000UL, 0}); // usa estado #2
+  s0.steps.push_back(StepSpec{0, 5UL*60UL*1000UL, 0});
+  s0.steps.push_back(StepSpec{1, 5UL*60UL*1000UL, 0});
+  s0.steps.push_back(StepSpec{2, 5UL*60UL*1000UL, 0});
   c.program.sets.push_back(s0);
 }
 
 // =================== Persistencia de ESTADOS ===================
-// Namespace: "states"
-// Claves:
-//   count                         (UChar)
-//   s{i}_name                     (String)
-//   s{i}_always, s{i}_a12         (UChar 0/1)
-//   s{i}_mm, s{i}_sm              (UShort: máscaras mains/secs)
 static bool loadRelayStates(std::vector<RelayState>& out) {
   out.clear();
   if (!statesPrefs.begin("states", /*ro*/ true)) return false;
@@ -231,7 +260,6 @@ static bool saveRelayStates(const std::vector<RelayState>& v) {
   return true;
 }
 
-// Defaults del catálogo de estados si está vacío.
 static void ensureStateDefaults(std::vector<RelayState>& out) {
   if (!out.empty()) return;
   out.clear();
@@ -239,15 +267,15 @@ static void ensureStateDefaults(std::vector<RelayState>& out) {
     RelayState a;
     a.name = "Zona 1";
     a.alwaysOn = true; a.alwaysOn12 = true;
-    a.mainsMask = (1u << 0);  // M0 ON
-    a.secsMask  = (1u << 0);  // S0 ON
+    a.mainsMask = (1u << 0);
+    a.secsMask  = (1u << 0);
     out.push_back(a);
   }
   {
     RelayState b;
     b.name = "Zona 2";
     b.alwaysOn = true; b.alwaysOn12 = true;
-    b.mainsMask = (1u << 1);  // M1 ON
+    b.mainsMask = (1u << 1);
     b.secsMask  = (1u << 0);
     out.push_back(b);
   }
@@ -255,42 +283,76 @@ static void ensureStateDefaults(std::vector<RelayState>& out) {
     RelayState c;
     c.name = "Zona 3";
     c.alwaysOn = true; c.alwaysOn12 = true;
-    c.mainsMask = (1u << 2);  // M2 ON
-    c.secsMask  = (1u << 1);  // S1 ON
+    c.mainsMask = (1u << 2);
+    c.secsMask  = (1u << 1);
     out.push_back(c);
   }
   saveRelayStates(out);
 }
 
-// Aplica y salva; reinicia para que AutoMode tome el nuevo programa (no reinicia por cambios en estados)
 static void applyAndSave() {
   saveIrrConfig(gIrrCfg);
   delay(50);
   ESP.restart();
 }
 
+// =================== Override de modo: helpers ===================
+static void loadModeOverride(bool& outOvr, bool& outManual) {
+  Preferences p;
+  outOvr = false; outManual = false;
+  if (p.begin(NS_MODE, /*ro*/ true)) {
+    outOvr    = p.getUChar("ovr", 0) != 0;
+    outManual = p.getUChar("manual", 0) != 0;
+    p.end();
+  }
+}
+
 // =================== TASK RIEGO ===================
 static void irrigationTask(void* /*pv*/) {
   pinMode(PIN_SWITCH_MANUAL, INPUT_PULLDOWN);
 
-  bool lastRaw    = (digitalRead(PIN_SWITCH_MANUAL) == HIGH);
-  uint32_t lastCh = millis();
-  bool manual     = lastRaw;
+  // Lee override inicial
+  loadModeOverride(gOvrEnabled, gOvrManual);
 
+  bool rawHW      = (digitalRead(PIN_SWITCH_MANUAL) == HIGH);
+  bool debHW      = rawHW;               // estado debounced del switch
+  uint32_t lastCh = millis();
+
+  // Estado de operación actual
+  bool manual = gOvrEnabled ? gOvrManual : debHW;
   if (manual) resetFullMode(); else resetBlinkMode();
 
+  uint32_t lastModeCheck = millis();
+
   for (;;) {
-    bool raw = (digitalRead(PIN_SWITCH_MANUAL) == HIGH);
     uint32_t now = millis();
-    if (raw != lastRaw && (now - lastCh) > MODE_DEBOUNCE_MS) {
-      lastRaw = raw; lastCh = now;
-      bool newManual = raw;
-      if (newManual != manual) {
-        manual = newManual;
-        if (manual) resetFullMode(); else resetBlinkMode();
+
+    // Debounce del switch físico (sólo si no hay override)
+    bool newRaw = (digitalRead(PIN_SWITCH_MANUAL) == HIGH);
+    if (newRaw != rawHW) { rawHW = newRaw; lastCh = now; }
+    if (!gOvrEnabled && (now - lastCh) > MODE_DEBOUNCE_MS) {
+      if (debHW != rawHW) debHW = rawHW;
+    }
+
+    // Refrescar override desde NVS cada ~500 ms
+    if (now - lastModeCheck > 500) {
+      lastModeCheck = now;
+      bool ovr, man;
+      loadModeOverride(ovr, man);
+      if (ovr != gOvrEnabled || man != gOvrManual) {
+        gOvrEnabled = ovr;
+        gOvrManual  = man;
       }
     }
 
+    // Decide modo deseado (override tiene prioridad)
+    bool desiredManual = gOvrEnabled ? gOvrManual : debHW;
+    if (desiredManual != manual) {
+      manual = desiredManual;
+      if (manual) resetFullMode(); else resetBlinkMode();
+    }
+
+    // Ejecuta modo actual
     if (manual) runFullMode();
     else        runBlinkMode();
 
@@ -312,6 +374,9 @@ static void startApAndMdns() {
 
 // =================== setup/loop ===================
 void setup() {
+  Serial.begin(SERIAL_BAUD);
+  delay(50);
+
   // Cargar config MQTT
   cfgStore.load(cfg);
 
@@ -351,26 +416,19 @@ void setup() {
 
   // API de Programación para WebUI (/sched)
   webui->attachScheduleAPI(
-    // getProgramEnabled
     [](){ return gIrrCfg.program.enabled; },
-    // setProgramEnabled
     [](bool en){ gIrrCfg.program.enabled = en; applyAndSave(); },
-    // getStarts
     [](){ return gIrrCfg.program.starts; },
-    // addStart
     [](const StartSpec& st){ gIrrCfg.program.starts.push_back(st); applyAndSave(); return true; },
-    // deleteStart
     [](unsigned int idx){
       if (idx >= gIrrCfg.program.starts.size()) return false;
       gIrrCfg.program.starts.erase(gIrrCfg.program.starts.begin()+idx);
       applyAndSave(); return true;
     },
-    // getSteps (StepSet 0)
     [](){
       if (gIrrCfg.program.sets.empty()) return std::vector<StepSpec>{};
       return gIrrCfg.program.sets[0].steps;
     },
-    // setSteps (StepSet 0)
     [](const std::vector<StepSpec>& v){
       if (gIrrCfg.program.sets.empty()) {
         StepSet s; s.name="Default"; s.pauseMsBetweenSteps=10000;
@@ -379,9 +437,7 @@ void setup() {
       gIrrCfg.program.sets[0].steps = v;
       applyAndSave(); return true;
     },
-    // getNowStr
     [](){ return nowString(); },
-    // setStarts (actualización masiva con set/ts/vs/en)
     [](const std::vector<StartSpec>& v){
       gIrrCfg.program.starts = v;
       applyAndSave(); return true;
@@ -390,16 +446,12 @@ void setup() {
 
   // API de ESTADOS (/states)
   webui->attachStateAPI(
-    // getter
     [](){ return gStates; },
-    // setter (guarda en RAM + persistencia)
     [](const std::vector<RelayState>& v){
       gStates = v;
       return saveRelayStates(gStates);
     },
-    // counts (num mains, num secs)
     [](){ return std::make_pair(HW_NUM_MAINS, HW_NUM_SECS); },
-    // nombres de columnas (opcional)
     [](int idx, bool isMain){
       if (isMain) return String("M") + String(idx);
       else        return String("S") + String(idx);
@@ -409,13 +461,27 @@ void setup() {
   // AP “config” + mDNS “config.local”
   startApAndMdns();
 
+  // Intenta conectar STA a la red marcada como automática
+  (void)tryAutoConnectFromPrefs();
+
   // Task de riego (core 0, prioridad baja)
   xTaskCreatePinnedToCore(irrigationTask, "irrigationTask", 6144, nullptr, 1, &gIrrigationTask, 0);
 }
 
 void loop() {
-  wifi.service();                 // Wi-Fi
-  if (wifi.isConnected()) chat.loop(); // MQTT
-  if (webui) webui->loop();       // HTTP
+  wifi.service();                      // Wi-Fi Manager (CLI)
+  if (wifi.isConnected()) chat.loop(); // MQTT si hay Wi-Fi
+  if (webui) webui->loop();            // HTTP
+
+  // Reintento suave de Wi-Fi cada 10 s si está caído
+  static unsigned long lastWiFiKick = 0;
+  unsigned long now = millis();
+  if (WiFi.status() != WL_CONNECTED && now - lastWiFiKick > 10000UL) {
+    lastWiFiKick = now;
+    if (!WiFi.reconnect()) {
+      (void)tryAutoConnectFromPrefs();
+    }
+  }
+
   delay(2);
 }
