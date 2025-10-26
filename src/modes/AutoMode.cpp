@@ -2,13 +2,19 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <math.h>
-#include <Preferences.h>   // << NUEVO: para leer franjas desde NVS
+#include <Preferences.h>   // NVS ventanas
 
 // ====== estáticos ISR ======
 volatile unsigned long AutoMode::pulse1_ = 0;
 volatile unsigned long AutoMode::pulse2_ = 0;
 volatile unsigned long AutoMode::lastMicros1_ = 0;
 volatile unsigned long AutoMode::lastMicros2_ = 0;
+
+// --- Registro del último inicio por ventana (evitar doble disparo) ---
+namespace {
+  int gLastWinYDay = -1;        // yday del último inicio por ventana
+  int gLastWinStartMin = -1;    // minuto-del-día (0..1439) del inicio de esa ventana
+}
 
 // ------------------- ctor -------------------
 AutoMode::AutoMode(RelayBank& bank,
@@ -403,16 +409,64 @@ void AutoMode::runScheduled() {
 
   // Arranque por horario (sólo si hay franja activa)
   if (phase_ == Phase::IDLE && haveTime) {
-    if (allowedNowByWindows_()) {                  // << NUEVO
+    if (allowedNowByWindows_()) {   // dentro de alguna franja
+      // 1) Prioridad: StartSpec explícitos
       int sIdx = shouldStartNow(nowTm);
       if (sIdx >= 0) {
         startProgramForStart((size_t)sIdx);
+        return;
+      }
+
+      // 2) Fallback: Arrancar al entrar (o si aún no se arrancó) en la ventana -> Set 0
+      //    Lee ventanas desde NVS y detecta en cuál estamos (s,e) con s<e
+      int md = nowTm.tm_hour * 60 + nowTm.tm_min;
+      int curStart = -1;
+      {
+        Preferences p;
+        if (p.begin("windows", true)) {
+          uint8_t cnt = p.getUChar("count", 0);
+          for (uint8_t i = 0; i < cnt && i < 60; ++i) {
+            uint8_t sh = p.getUChar((String("w")+i+"_sh").c_str(), 0);
+            uint8_t sm = p.getUChar((String("w")+i+"_sm").c_str(), 0);
+            uint8_t eh = p.getUChar((String("w")+i+"_eh").c_str(), 0);
+            uint8_t em = p.getUChar((String("w")+i+"_em").c_str(), 0);
+            int s = (int)sh*60 + (int)sm;
+            int e = (int)eh*60 + (int)em;
+            if (s < e && md >= s && md < e) { curStart = s; break; }
+          }
+          p.end();
+        }
+      }
+
+      if (curStart >= 0 && prog_ && prog_->enabled && !prog_->sets.empty()) {
+        // ¿ya arrancamos esta ventana hoy?
+        if (gLastWinYDay != nowTm.tm_yday || gLastWinStartMin != curStart) {
+          // Selecciona el Set 0 por defecto
+          curStartIdx_ = -1;          // “no viene de StartSpec”
+          curSetIdx_   = 0;
+          timeScale_   = 1.0f;
+          volScale_    = 1.0f;
+          phase_       = Phase::RUN_STEP;
+          stepIdx_     = 0;
+          runVolumeMl_ = 0;
+
+          noInterrupts();
+          stepStartP1_ = pulse1_;
+          stepStartP2_ = pulse2_;
+          interrupts();
+
+          beginStep_(stepIdx_);
+
+          gLastWinYDay     = nowTm.tm_yday;
+          gLastWinStartMin = curStart;
+          return;
+        }
       }
     }
   }
 
   // Si estamos corriendo o en pausa y salimos de franja: detener
-  if ((phase_ == Phase::RUN_STEP || phase_ == Phase::PAUSE) && !allowedNowByWindows_()) { // << NUEVO
+  if ((phase_ == Phase::RUN_STEP || phase_ == Phase::PAUSE) && !allowedNowByWindows_()) {
     stopProgram();
     return;
   }
@@ -503,7 +557,7 @@ uint32_t AutoMode::computeNextStartEpoch_() const {
   return (best > 0) ? (uint32_t)best : 0;
 }
 
-// =================== NUEVO: Franjas horarias desde NVS ===================
+// =================== Ventanas (permiso por hora) ===================
 bool AutoMode::allowedNowByWindows_() const {
   // Cache simple para evitar I/O constante en NVS (refresca cada 5s)
   struct Win { uint8_t sh, sm, eh, em; };

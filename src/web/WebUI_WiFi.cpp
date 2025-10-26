@@ -7,6 +7,11 @@
 #include "../time/TimeSync.h"  // getTimeSyncInfo()
 #include "hw/RelayPins.h"      // mapa de pines del proyecto
 
+/* ======== Namespaces NVS usados localmente en este TU ======== */
+static const char* NS_MODE     = "mode";       // coincide con WebUI_Mode.cpp y main.cpp
+static const char* NS_WINDOWS  = "windows";    // coincide con WebUI_TimeWindows.cpp
+static const char* NS_WIFI     = "wifi_saved"; // coincide con main.cpp (autoconexión)
+
 /* ================= Helpers GPIO (solo para Home) ================= */
 
 static bool vecContains_(const std::vector<int>& v, int x){ for(int p: v) if(p==x) return true; return false; }
@@ -61,7 +66,7 @@ static String dirOf_(int pin) {
   return F("—");
 }
 
-// Formatea “hace Xh Ym Zs” a partir de milisegundos
+// Formatea “Xh Ym Zs” a partir de milisegundos
 static String fmtSinceMs_(uint32_t ms) {
   uint32_t s = ms / 1000;
   uint32_t h = s / 3600;
@@ -72,6 +77,12 @@ static String fmtSinceMs_(uint32_t ms) {
   if (h || m) { out += String(m) + F("m "); }
   out += String(ss) + F("s");
   return out;
+}
+
+// Primer bit encendido (LSB index o -1)
+static int firstSetBit_(uint16_t mask) {
+  for (int i=0;i<16;i++) if (mask & (1u<<i)) return i;
+  return -1;
 }
 
 // Asegura que los pines ENTRADA tengan pulls correctos para LEER en Home
@@ -232,6 +243,39 @@ void WebUI::handleRoot() {
     s += F("</p></div>");
   }
 
+  // ====== Bloque: Zonas/Estados -> Tiempo y Volumen (desde ZoneParams) ======
+  {
+    std::vector<RelayState> states;
+    bool haveStates = (bool)getStates_;
+    if (haveStates) states = getStates_();
+
+    s += F("<div class='formcard'><h4>Zonas programadas</h4>");
+    s += F("<p><small>Mostrando <b>Tiempo</b> (ms → hh:mm:ss) y <b>Volumen</b> (mL) configurados por zona.</small></p>");
+
+    if (!haveStates) {
+      s += F("<p><i>No hay información de estados disponible.</i></p></div>");
+    } else {
+      s += F("<table><tr><th>#</th><th>Nombre</th><th>Tiempo</th><th>Volumen</th></tr>");
+
+      for (size_t i=0;i<states.size();++i) {
+        ZoneParams zp;  // definido en WebUI.h, persistido en WebUI_States.cpp
+        (void)loadZoneParams((int)i, zp); // si no existe, queda en 0 por defecto
+
+        s += F("<tr><td>");
+        s += String(i);
+        s += F("</td><td>");
+        s += states[i].name;
+        s += F("</td><td>");
+        s += fmtSinceMs_(zp.timeMs);
+        s += F("</td><td>");
+        s += String(zp.volumeMl);
+        s += F(" ml</td></tr>");
+      }
+
+      s += F("</table></div>");
+    }
+  }
+
   // ================= Tabla GPIO =================
   // Conjunto de pines relevantes del proyecto (evitamos 6..11 por flash)
   std::vector<int> pins;
@@ -294,7 +338,7 @@ bool WebUI::loadSaved() {
     n.ssid = prefs.getString((String("n")+i+"_ssid").c_str(), "");
     n.pass = prefs.getString((String("n")+i+"_pass").c_str(), "");
     n.open = prefs.getBool   ((String("n")+i+"_open").c_str(), false);
-    if (n.ssid.length()) saved_[savedCount_++] = n;
+    if (n.ssid.length()) saved_[savedCount_] = n, savedCount_++;
   }
   prefs.end();
   if (autoIdx_ < -1 || autoIdx_ >= savedCount_) autoIdx_ = -1;
