@@ -10,8 +10,8 @@
 #include "../mqtt/MqttChat.h"
 #include "../config/MqttConfig.h"
 #include "../config/MqttConfigStore.h"
-#include "../modes/AutoMode.h"          // Define StartSpec / StepSpec
-#include "../state/RelayState.h"        // Define RelayState
+#include "../modes/AutoMode.h"          // StartSpec / StepSpec
+#include "../state/RelayState.h"        // RelayState
 
 class WebUI {
 public:
@@ -23,7 +23,6 @@ public:
 
   void begin();
   void loop();
-
   void attachMqttSink();
 
   // ======== API de Schedule ========
@@ -70,6 +69,15 @@ public:
     uint8_t  fert2Pct = 0;
   };
 
+  // ======== Franjas horarias ========
+  struct TimeWindow {
+    String  name;
+    uint8_t sh = 0;  // start hour   [0..23]
+    uint8_t sm = 0;  // start minute [0..59]
+    uint8_t eh = 0;  // end hour
+    uint8_t em = 0;  // end minute
+  };
+
 private:
   // ---------- Wi-Fi guardadas ----------
   struct SavedNet {
@@ -79,8 +87,10 @@ private:
   };
 
   // Namespaces de Preferences
-  static constexpr const char* NS_WIFI  = "wifi_saved";
-  static constexpr const char* NS_ZONES = "zones";
+  static constexpr const char* NS_WIFI    = "wifi_saved";
+  static constexpr const char* NS_ZONES   = "zones";
+  static constexpr const char* NS_MODE    = "mode";
+  static constexpr const char* NS_WINDOWS = "windows";
 
   // Máx redes guardadas
   static constexpr int MAX_SAVED = 10;
@@ -157,11 +167,22 @@ private:
   void handleStepsPage();             // vista de pasos (StepSet 0)
   void handleStepsSave();             // guardar pasos
 
-  // ======= Modo =======
+  // ======= Modo (Manual/Auto + control manual por SW) =======
   void handleMode();
   void handleModeSet();
-  void handleModeManualStart();   // <-- NUEVO (declarado)
-  void handleModeManualStop();    // <-- NUEVO (declarado)
+  void handleModeManualStart();
+  void handleModeManualStop();
+
+  // ======= Franjas horarias =======
+  void handleWindowsPage();
+  void handleWindowsSave();
+  void handleWindowsDelete();
+
+  // Persistencia y validación de franjas
+  bool loadTimeWindows(std::vector<TimeWindow>& out);
+  bool saveTimeWindows(const std::vector<TimeWindow>& v);
+  bool windowsOverlap(const TimeWindow& a, const TimeWindow& b) const;
+  bool validateNoOverlap(const std::vector<TimeWindow>& v, const TimeWindow& cand, int ignoreIndex) const;
 
 private:
   WebServer&        server_;

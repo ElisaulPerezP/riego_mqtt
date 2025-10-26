@@ -2,6 +2,7 @@
 #include "web/WebUI.h"
 #include <WiFi.h>
 
+/* ================================== HTML helpers ================================== */
 String WebUI::htmlHeader(const String& title) const {
   String ipSTA = (uint32_t)WiFi.localIP()   ? WiFi.localIP().toString()   : F("(sin IP)");
   String ipAP  = (uint32_t)WiFi.softAPIP()  ? WiFi.softAPIP().toString()  : F("(sin AP)");
@@ -23,15 +24,16 @@ String WebUI::htmlHeader(const String& title) const {
   s += F("<p>AP: <b>config</b> · mDNS: <a href='http://config.local/'>config.local</a></p>");
   s += F("<p>IP AP: <code>");  s += ipAP;  s += F("</code><br>");
   s += F("IP LAN (STA): <code>"); s += ipSTA; s += F("</code></p>");
+  // NAV con link a Franjas
   s += F("<nav>"
-        "<a href='/'>Home</a> · "
-        "<a href='/states'>Estados</a> · "
-        "<a href='/mode'>Modo</a> · "
-        "<a href='/wifi/info'>WiFi</a> · "
-        "<a href='/wifi/scan'>Escanear</a> · "
-        "<a href='/wifi/saved'>Guardadas</a> · "
-        "<a href='/mqtt'>MQTT</a>"
-        "</nav><hr/>");
+         "<a href='/'>Home</a> · "
+         "<a href='/states'>Estados</a> · "
+         "<a href='/mode'>Modo</a> · "
+         "<a href='/windows'>Franjas</a> · "
+         "<a href='/wifi/info'>WiFi</a> · "
+         "<a href='/wifi/saved'>Guardadas</a> · "
+         "<a href='/mqtt'>MQTT</a>"
+         "</nav><hr/>");
   return s;
 }
 
