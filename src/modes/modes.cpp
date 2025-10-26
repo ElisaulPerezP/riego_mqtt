@@ -1,4 +1,3 @@
-// File: src/modes/modes.cpp
 #include "modes.h"
 #include "ManualMode.h"
 #include "AutoMode.h"
@@ -11,21 +10,28 @@
 // -------------------- Pines/const originales --------------------
 namespace FULL {
   enum {
-    PIN_NEXT              = 13,  // activo LOW
+    // Pulsadores con pull-down -> activo HIGH
+    PIN_NEXT              = 13,  // activo HIGH
     PIN_PREV              = 4,   // activo HIGH
+
     PIN_ALWAYS_ON         = 33,
     PIN_ALWAYS_ON_12      = 12,
+
+    // Auxiliares según README: 25=Fert1 (AH), 14=Alarma (AH)
     PIN_TOGGLE_NEXT       = 25,
     PIN_TOGGLE_PREV       = 14
   };
-  static const int  MAIN_PINS[]       = {5,18,0,21,17,3,2,22,16,1,15,23};
-  static const bool MAIN_ACTIVE_LOW[] = {true,true,true,true,true,true,true,true,true,true,true,true};
+
+  // === Orden/AL EXACTO del README ===
+  static const int  MAIN_PINS[]       = { 0, 2, 5, 15, 16, 17, 1, 3, 18, 21, 22, 23 };
+  static const bool MAIN_ACTIVE_LOW[] = { 1, 1, 1,  1,  1,  1, 1, 1,  1,  1,  1,  1 };
   static const int  NUM_MAINS         = sizeof(MAIN_PINS)/sizeof(MAIN_PINS[0]);
 
-  static const int  SEC_PINS[]        = {27,26};
-  static const bool SEC_ACTIVE_LOW[]  = {false,false};
+  static const int  SEC_PINS[]        = { 26, 27 };     // (AH)
+  static const bool SEC_ACTIVE_LOW[]  = { 0, 0 };
   static const int  NUM_SECS          = sizeof(SEC_PINS)/sizeof(SEC_PINS[0]);
 
+  // Mantengo tu tabla de estados personalizada (índices [0..NUM_MAINS*2])
   static const int CUSTOM_STATES[] = {
      15,17,3,1,11,9,7,13,19,5,23,21,
       8,12,16,
@@ -42,25 +48,27 @@ namespace BLINK {
   enum {
     PIN_ALWAYS_ON        = 33,
     PIN_ALWAYS_ON_12     = 12,
-    PIN_TOGGLE_NEXT      = 25,
-    PIN_TOGGLE_PREV      = 14,
-    PIN_OVR_NEXT         = 13,
-    PIN_OVR_PREV         = 4
+    PIN_TOGGLE_NEXT      = 25,   // Fert1
+    PIN_TOGGLE_PREV      = 14,   // Alarma
+    PIN_OVR_NEXT         = 13,   // activo HIGH (pull-down)
+    PIN_OVR_PREV         = 4     // activo HIGH (pull-down)
   };
-  static const int  MAIN_PINS[]       = {5,18,0,21,17,3,2,22,16,1,15,23};
-  static const bool MAIN_ACTIVE_LOW[] = {true,true,true,true,true,true,true,true,true,true,true,true};
-  static const int  SEC_PINS[]        = {26,27};
-  static const bool SEC_ACTIVE_LOW[]  = {false,false};
 
-  static const int CUSTOM_STATES[] = {15,17,3,1,11,9,7,13,19,5,23,21,8,12,16};
+  // Uso mismo orden que README
+  static const int  MAIN_PINS[]       = { 0, 2, 5, 15, 16, 17, 1, 3, 18, 21, 22, 23 };
+  static const bool MAIN_ACTIVE_LOW[] = { 1, 1, 1,  1,  1,  1, 1, 1,  1,  1,  1,  1 };
+  static const int  SEC_PINS[]        = { 26, 27 };
+  static const bool SEC_ACTIVE_LOW[]  = { 0, 0 };
+
+  static const int CUSTOM_STATES[] = { 15,17,3,1,11,9,7,13,19,5,23,21,8,12,16 };
   static const int NUM_CUSTOM_STATES = sizeof(CUSTOM_STATES)/sizeof(CUSTOM_STATES[0]);
 
   static const unsigned long STATE_MS = 5UL * 60UL * 1000UL;
   static const unsigned long OFF_MS   = 4UL * 60UL * 60UL * 1000UL;
   static const unsigned long STEP_MS  = 500UL;
 
-  static const int PIN_FLOW_1 = 34;
-  static const int PIN_FLOW_2 = 35;
+  static const int PIN_FLOW_1 = 34;  // pull-up externo
+  static const int PIN_FLOW_2 = 35;  // pull-up externo
 }
 
 // -------------------- Objetos --------------------

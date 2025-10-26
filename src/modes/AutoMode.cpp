@@ -37,8 +37,9 @@ void IRAM_ATTR AutoMode::isrFlow2Thunk() {
 // ------------------- ciclo de vida -------------------
 void AutoMode::begin() {
   bank_.begin();
-  if (pinFlow1_ >= 0) { pinMode(pinFlow1_, INPUT_PULLUP); attachInterrupt(digitalPinToInterrupt(pinFlow1_), isrFlow1Thunk, RISING); }
-  if (pinFlow2_ >= 0) { pinMode(pinFlow2_, INPUT_PULLUP); attachInterrupt(digitalPinToInterrupt(pinFlow2_), isrFlow2Thunk, RISING); }
+  // Pull-up externo según README -> INPUT (sin PULLUP interno)
+  if (pinFlow1_ >= 0) { pinMode(pinFlow1_, INPUT); attachInterrupt(digitalPinToInterrupt(pinFlow1_), isrFlow1Thunk, RISING); }
+  if (pinFlow2_ >= 0) { pinMode(pinFlow2_, INPUT); attachInterrupt(digitalPinToInterrupt(pinFlow2_), isrFlow2Thunk, RISING); }
 
   phaseStart_ = stateStart_ = millis();
   // Si no hay programa configurado, arranca con la transición inicial legacy.

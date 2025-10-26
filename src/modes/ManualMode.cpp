@@ -1,10 +1,10 @@
 #include "modes/ManualMode.h"
 
-// Arrays estáticos (igual que tenías)
-const uint8_t ManualMode::MAIN_PINS_[12] = { 5,18,0,21,17,3,2,22,16,1,15,23 };
-const bool    ManualMode::MAIN_AL_[12]   = { 1,1,1,1,1,1,1,1,1,1,1,1 };
-const uint8_t ManualMode::SEC_PINS_[2]   = { 27,26 };
-const bool    ManualMode::SEC_AL_[2]     = { 0, 0 };
+// Arrays estáticos (reordenados EXACTO al README)
+const uint8_t ManualMode::MAIN_PINS_[12] = { 0, 2, 5, 15, 16, 17, 1, 3, 18, 21, 22, 23 };
+const bool    ManualMode::MAIN_AL_[12]   = { 1, 1, 1,  1,  1,  1, 1, 1,  1,  1,  1,  1 };
+const uint8_t ManualMode::SEC_PINS_[2]   = { 26, 27 };
+const bool    ManualMode::SEC_AL_[2]     = { 0,  0 };
 
 // ISR caudal
 volatile unsigned long ManualMode::pulses1_ = 0;
@@ -43,7 +43,7 @@ void ManualMode::allMainsOff() {
 }
 void ManualMode::allSecsOff() {
   for (int j=0;j<NUM_SECS_;++j)
-    digitalWrite(SEC_PINS_[j], SEC_AL_[j]? HIGH:LOW);
+    digitalWrite(SEC_PINS_[j],  SEC_AL_[j]? HIGH:LOW);
 }
 void ManualMode::applyMainsPattern(int m, bool direct) {
   for (int i=0;i<NUM_MAINS_;++i) {
@@ -97,7 +97,8 @@ void ManualMode::begin() {
   pinMode(PIN_ALWAYS_ON_,    OUTPUT);
   pinMode(PIN_ALWAYS_ON_12_, OUTPUT);
 
-  pinMode(pins_.pinNext, INPUT_PULLUP);
+  // Pulsadores: pull-down -> activo HIGH
+  pinMode(pins_.pinNext, INPUT_PULLDOWN);
   pinMode(pins_.pinPrev, INPUT_PULLDOWN);
 
   allMainsOff(); allSecsOff();
@@ -131,8 +132,9 @@ void ManualMode::reset() {
 
 // ----------- Web latch ----------
 void ManualMode::attachFlowIsr_() {
-  if (pinFlow1_>=0) { pinMode(pinFlow1_, INPUT_PULLUP); attachInterrupt(digitalPinToInterrupt(pinFlow1_), isrFlow1_, RISING); }
-  if (pinFlow2_>=0) { pinMode(pinFlow2_, INPUT_PULLUP); attachInterrupt(digitalPinToInterrupt(pinFlow2_), isrFlow2_, RISING); }
+  // Pull-up externo según README -> INPUT (sin PULLUP interno)
+  if (pinFlow1_>=0) { pinMode(pinFlow1_, INPUT); attachInterrupt(digitalPinToInterrupt(pinFlow1_), isrFlow1_, RISING); }
+  if (pinFlow2_>=0) { pinMode(pinFlow2_, INPUT); attachInterrupt(digitalPinToInterrupt(pinFlow2_), isrFlow2_, RISING); }
 }
 void ManualMode::detachFlowIsr_() {
   if (pinFlow1_>=0) detachInterrupt(digitalPinToInterrupt(pinFlow1_));
@@ -181,15 +183,14 @@ void ManualMode::run() {
   if (!initialized_) { begin(); return; }
 
   if (webActive_) {
-    // Latch: no hacemos nada salvo mantener el estado aplicado
-    // (El caudal se acumula por ISR si lo necesitas para UI)
+    // Latch: mantener estado aplicado
     return;
   }
 
-  // ===== comportamiento con botones (igual al tuyo) =====
+  // ===== comportamiento con botones =====
   const unsigned long now = millis();
-  const bool nextRaw = (digitalRead(pins_.pinNext) == LOW);
-  const bool prevRaw = (digitalRead(pins_.pinPrev) == HIGH);
+  const bool nextRaw = (digitalRead(pins_.pinNext) == HIGH); // pull-down -> HIGH al presionar
+  const bool prevRaw = (digitalRead(pins_.pinPrev) == HIGH); // pull-down -> HIGH al presionar
 
   if (nextRaw) {
     if (nextPressStart_==0) nextPressStart_=now;
