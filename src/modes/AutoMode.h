@@ -86,6 +86,9 @@ private:
   uint32_t volumeMlFromPulses_(uint32_t d1, uint32_t d2) const;
   uint32_t computeNextStartEpoch_() const;
 
+  // ====== NUEVO: semáforo por Franjas (/windows en NVS) ======
+  bool allowedNowByWindows_() const;   // true si hora actual cae en alguna franja válida
+
 private:
   // Dependencias
   RelayBank&      bank_;

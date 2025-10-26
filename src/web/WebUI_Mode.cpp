@@ -1,6 +1,7 @@
 // File: src/web/WebUI_Mode.cpp
 #include "web/WebUI.h"
 #include <Preferences.h>
+#include "modes/modes.h"   // <-- Necesario para manualWeb_startState / manualWeb_stopState / resetFullMode
 
 // Namespace de persistencia para la página de Modo
 static const char* NS_MODE = "mode";
@@ -93,7 +94,7 @@ void WebUI::handleMode() {
     }
     s += F("</select></label></p>");
 
-    // Porcentajes fertilizantes
+    // Porcentajes fertilizantes (guardados, no aplicados aquí aún)
     s += F("<p>p_fert_1:&nbsp;"
            "<input type='range' id='p1r' name='p1' min='0' max='100' value='");
     s += String(p1);
@@ -146,39 +147,67 @@ void WebUI::handleModeSet() {
 }
 
 // =============== POST: /mode/manual/start =================
-// IMPORTANTE: NO tocar 'ovr' ni 'manual'. Solo el "estado de la corrida" manual.
+// AHORA: además de guardar, FORZAMOS override=manual y APLICAMOS el estado a GPIO.
 void WebUI::handleModeManualStart() {
   int sel = server_.hasArg("sel") ? server_.arg("sel").toInt() : -1;
   uint8_t p1 = server_.hasArg("p1") ? (uint8_t)constrain(server_.arg("p1").toInt(), 0, 100) : 0;
   uint8_t p2 = server_.hasArg("p2") ? (uint8_t)constrain(server_.arg("p2").toInt(), 0, 100) : 0;
 
-  Preferences p;
-  if (p.begin(NS_MODE, /*ro*/ false)) {
-    // Preserva ovr/manual: NO p.clear()
-    p.putInt   ("sel", sel);
-    p.putUChar ("p1",  p1);
-    p.putUChar ("p2",  p2);
-    p.putUChar ("run", 1);               // marca que hay ejecución manual
-    p.putULong ("run_since", millis());  // por si otra parte del sistema mide volumen/tiempo
-    p.end();
+  // Obtener estados actuales
+  if (!getStates_) {
+    server_.send(500, F("text/plain"), F("States API no inicializada"));
+    return;
+  }
+  std::vector<RelayState> states = getStates_();
+  if (sel < 0 || sel >= (int)states.size()) {
+    server_.send(400, F("text/plain"), F("Índice de estado inválido"));
+    return;
+  }
+  const RelayState& rs = states[sel];
+
+  // 1) Forzar override a MANUAL para que irrigationTask cambie de modo
+  {
+    Preferences p;
+    if (p.begin(NS_MODE, /*ro*/ false)) {
+      p.putUChar("ovr",    1);  // override ON
+      p.putUChar("manual", 1);  // modo MANUAL
+      // 2) Guardar selección/params/flags de corrida
+      p.putInt   ("sel", sel);
+      p.putUChar ("p1",  p1);
+      p.putUChar ("p2",  p2);
+      p.putUChar ("run", 1);
+      p.putULong ("run_since", millis());
+      p.end();
+    }
   }
 
-  // Activación real de la zona debe hacerse en tu lógica de control leyendo estas claves.
+  // 3) Resetear estado interno de ManualMode (limpia toggles, etc.)
+  resetFullMode();
+
+  // 4) APLICAR de inmediato el estado al hardware (latch manual web)
+  manualWeb_startState(rs);
+
+  // Redirige a /mode
   server_.sendHeader(F("Location"), "/mode");
   server_.send(302, F("text/plain"), "");
 }
 
 // =============== POST: /mode/manual/stop =================
-// IMPORTANTE: NO tocar 'ovr' ni 'manual' aquí tampoco.
+// AHORA: además de marcar run=0, soltamos el latch manual (apaga salidas según tu implementación).
 void WebUI::handleModeManualStop() {
-  Preferences p;
-  if (p.begin(NS_MODE, /*ro*/ false)) {
-    // Preserva resto: solo marca fin de ejecución
-    p.putUChar("run", 0);
-    p.end();
+  // 1) Marcar fin de ejecución en NVS
+  {
+    Preferences p;
+    if (p.begin(NS_MODE, /*ro*/ false)) {
+      p.putUChar("run", 0);
+      p.end();
+    }
   }
 
-  // El apagado real debe ejecutarse en tu lógica de control (leyendo 'run' = 0).
+  // 2) Detener activamente el latch manual
+  manualWeb_stopState();
+
+  // Redirige a /mode
   server_.sendHeader(F("Location"), "/mode");
   server_.send(302, F("text/plain"), "");
 }

@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <math.h>
+#include <Preferences.h>   // << NUEVO: para leer franjas desde NVS
 
 // ====== estáticos ISR ======
 volatile unsigned long AutoMode::pulse1_ = 0;
@@ -399,12 +400,20 @@ void AutoMode::runScheduled() {
   struct tm nowTm;
   bool haveTime = timeNow(nowTm);
 
-  // Arranque por horario
+  // Arranque por horario (sólo si hay franja activa)
   if (phase_ == Phase::IDLE && haveTime) {
-    int sIdx = shouldStartNow(nowTm);
-    if (sIdx >= 0) {
-      startProgramForStart((size_t)sIdx);
+    if (allowedNowByWindows_()) {                  // << NUEVO
+      int sIdx = shouldStartNow(nowTm);
+      if (sIdx >= 0) {
+        startProgramForStart((size_t)sIdx);
+      }
     }
+  }
+
+  // Si estamos corriendo o en pausa y salimos de franja: detener
+  if ((phase_ == Phase::RUN_STEP || phase_ == Phase::PAUSE) && !allowedNowByWindows_()) { // << NUEVO
+    stopProgram();
+    return;
   }
 
   if (!prog_ || curSetIdx_ < 0 || (size_t)curSetIdx_ >= prog_->sets.size()) return;
@@ -491,4 +500,50 @@ uint32_t AutoMode::computeNextStartEpoch_() const {
     }
   }
   return (best > 0) ? (uint32_t)best : 0;
+}
+
+// =================== NUEVO: Franjas horarias desde NVS ===================
+bool AutoMode::allowedNowByWindows_() const {
+  // Cache simple para evitar I/O constante en NVS (refresca cada 5s)
+  struct Win { uint8_t sh, sm, eh, em; };
+  static Win cache[60];
+  static uint8_t cacheCnt = 0;
+  static uint32_t lastReadMs = 0;
+
+  const uint32_t nowMs = millis();
+  if (lastReadMs == 0 || (nowMs - lastReadMs) > 5000) {
+    cacheCnt = 0;
+    Preferences p;
+    if (p.begin("windows", true)) {
+      uint8_t cnt = p.getUChar("count", 0);
+      for (uint8_t i = 0; i < cnt && i < 60; ++i) {
+        Win w;
+        w.sh = p.getUChar((String("w")+i+"_sh").c_str(), 0);
+        w.sm = p.getUChar((String("w")+i+"_sm").c_str(), 0);
+        w.eh = p.getUChar((String("w")+i+"_eh").c_str(), 0);
+        w.em = p.getUChar((String("w")+i+"_em").c_str(), 0);
+        // Validar rango: semi-abierto [start, end), sin cruzar medianoche
+        int s = (int)w.sh*60 + (int)w.sm;
+        int e = (int)w.eh*60 + (int)w.em;
+        if (s < e) cache[cacheCnt++] = w;
+      }
+      p.end();
+    }
+    lastReadMs = nowMs ? nowMs : 1;
+  }
+
+  // Si no hay franjas: permitir (compatibilidad hacia atrás)
+  if (cacheCnt == 0) return true;
+
+  // Si no hay hora válida (sin NTP), permitir (no bloquear)
+  struct tm tmnow;
+  if (!timeNow(tmnow)) return true;
+
+  const int md = tmnow.tm_hour * 60 + tmnow.tm_min;
+  for (uint8_t i = 0; i < cacheCnt; ++i) {
+    const int s = (int)cache[i].sh*60 + (int)cache[i].sm;
+    const int e = (int)cache[i].eh*60 + (int)cache[i].em;
+    if (md >= s && md < e) return true;
+  }
+  return false;
 }

@@ -280,12 +280,12 @@ static void ensureStateDefaults(std::vector<RelayState>& out) {
     out.push_back(b);
   }
   {
-    RelayState c;
-    c.name = "Zona 3";
-    c.alwaysOn = true; c.alwaysOn12 = true;
-    c.mainsMask = (1u << 2);
-    c.secsMask  = (1u << 1);
-    out.push_back(c);
+    RelayState c_;
+    c_.name = "Zona 3";
+    c_.alwaysOn = true; c_.alwaysOn12 = true;   // <-- FIX: antes decía a.alwaysOn12
+    c_.mainsMask = (1u << 2);
+    c_.secsMask  = (1u << 1);
+    out.push_back(c_);
   }
   saveRelayStates(out);
 }
@@ -385,6 +385,9 @@ void setup() {
     ensureIrrDefaults(gIrrCfg);
     saveIrrConfig(gIrrCfg);
   }
+
+  // **ENLACE NUEVO**: pasar programa/calibración vivos al motor Auto
+  modesSetProgram(gIrrCfg.program, gIrrCfg.flowCal);  // <<<<<<<<<<<<<<<<<<<<<<<< ADICIÓN
 
   // Cargar catálogo de ESTADOS (o crear defaults si vacío)
   if (!loadRelayStates(gStates)) {

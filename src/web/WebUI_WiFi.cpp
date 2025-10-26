@@ -2,6 +2,73 @@
 #include "web/WebUI.h"
 #include <WiFi.h>
 #include <Preferences.h>
+#include <vector>
+#include "hw/RelayPins.h"     // mapa de pines del proyecto
+
+/* ================= Helpers GPIO (solo para Home) ================= */
+
+static bool vecContains_(const std::vector<int>& v, int x){ for(int p: v) if(p==x) return true; return false; }
+
+static bool mainActiveLowOf_(int pin, bool& outAL, int& outIdx) {
+  for (int i=0;i<RP::NUM_MAINS;i++){
+    if (RP::MAIN_PINS[i]==pin){ outAL = RP::MAIN_ACTIVE_LOW[i]; outIdx = i; return true; }
+  }
+  return false;
+}
+static bool secActiveLowOf_(int pin, bool& outAL, int& outIdx) {
+  for (int j=0;j<RP::NUM_SECS;j++){
+    if (RP::SEC_PINS[j]==pin){ outAL = RP::SEC_ACTIVE_LOW[j]; outIdx = j; return true; }
+  }
+  return false;
+}
+
+static String roleOf_(int pin, bool& hasAL, bool& al) {
+  hasAL=false; al=false;
+  int idx=-1;
+  if (mainActiveLowOf_(pin, al, idx)) { hasAL=true; return String(F("MAIN["))+String(idx)+F("]"); }
+  if (secActiveLowOf_(pin,  al, idx)) { hasAL=true; return String(F("SEC[" ))+String(idx)+F("]"); }
+  if (pin==RP::PIN_ALWAYS_ON)    { hasAL=false; return F("ALWAYS_ON"); }
+  if (pin==RP::PIN_ALWAYS_ON_12) { hasAL=false; return F("ALWAYS_ON_12"); }
+  if (pin==RP::PIN_TOGGLE_NEXT)  { hasAL=false; return F("TOGGLE_NEXT"); }
+  if (pin==RP::PIN_TOGGLE_PREV)  { hasAL=false; return F("TOGGLE_PREV"); }
+  if (pin==RP::PIN_FLOW_1)       { hasAL=false; return F("FLOW_1"); }
+  if (pin==RP::PIN_FLOW_2)       { hasAL=false; return F("FLOW_2"); }
+  if (pin==RP::PIN_SWITCH_MANUAL){ hasAL=false; return F("SWITCH_MANUAL"); }
+  if (pin==RP::PIN_NEXT)         { hasAL=false; return F("BTN_NEXT"); }
+  if (pin==RP::PIN_PREV)         { hasAL=false; return F("BTN_PREV"); }
+  return F("-");
+}
+
+static bool isFlashPin_(int pin) { return (pin>=6 && pin<=11); } // evitar pines del flash
+
+static String interpFromAL_(int level, bool hasAL, bool al) {
+  if (!hasAL) return F("—");
+  bool on = al ? (level==LOW) : (level==HIGH);
+  return on ? F("ON") : F("OFF");
+}
+
+// Dirección inferida por rol (sin driver IDF)
+static String dirOf_(int pin) {
+  bool dummyAL; int dummyIdx;
+  if (mainActiveLowOf_(pin, dummyAL, dummyIdx)) return F("OUT");
+  if (secActiveLowOf_(pin,  dummyAL, dummyIdx)) return F("OUT");
+  if (pin==RP::PIN_ALWAYS_ON || pin==RP::PIN_ALWAYS_ON_12 ||
+      pin==RP::PIN_TOGGLE_NEXT || pin==RP::PIN_TOGGLE_PREV) return F("OUT");
+  if (pin==RP::PIN_FLOW_1 || pin==RP::PIN_FLOW_2 ||
+      pin==RP::PIN_SWITCH_MANUAL || pin==RP::PIN_NEXT || pin==RP::PIN_PREV) return F("IN");
+  return F("—");
+}
+
+// Asegura que los pines marcados como ENTRADA estén configurados con pulls correctos
+// para poder LEERLOS de forma estable en la vista Home, sin depender del modo activo.
+static void ensureInputReadConfig_() {
+  if (RP::PIN_SWITCH_MANUAL >= 0) pinMode(RP::PIN_SWITCH_MANUAL, INPUT_PULLDOWN);
+  if (RP::PIN_NEXT          >= 0) pinMode(RP::PIN_NEXT,          INPUT_PULLUP);
+  if (RP::PIN_PREV          >= 0) pinMode(RP::PIN_PREV,          INPUT_PULLDOWN);
+  // Los caudalímetros suelen ir con pull-up interno:
+  if (RP::PIN_FLOW_1        >= 0) pinMode(RP::PIN_FLOW_1,        INPUT_PULLUP);
+  if (RP::PIN_FLOW_2        >= 0) pinMode(RP::PIN_FLOW_2,        INPUT_PULLUP);
+}
 
 /* ====================== HOME ====================== */
 void WebUI::handleRoot() {
@@ -13,6 +80,56 @@ void WebUI::handleRoot() {
   s += F("<li><a href='/wifi/scan'>Escanear y conectar</a></li>");
   s += F("<li><a href='/wifi/saved'>Redes guardadas / autoconexión</a></li>");
   s += F("<li><a href='/mqtt'>MQTT (config, estado, chat)</a></li></ul>");
+
+  // Antes de leer, garantizamos configuración estable de ENTRADAS
+  ensureInputReadConfig_();
+
+  // ================= Tabla GPIO =================
+  // Conjunto de pines relevantes del proyecto (evitamos 6..11 por flash)
+  std::vector<int> pins;
+  // MAIN/SEC
+  for (int i=0;i<RP::NUM_MAINS;i++) if (!vecContains_(pins, RP::MAIN_PINS[i]) && !isFlashPin_(RP::MAIN_PINS[i])) pins.push_back(RP::MAIN_PINS[i]);
+  for (int j=0;j<RP::NUM_SECS; j++) if (!vecContains_(pins, RP::SEC_PINS[j])   && !isFlashPin_(RP::SEC_PINS[j]))   pins.push_back(RP::SEC_PINS[j]);
+  // Control/aux
+  const int extras[] = {
+    RP::PIN_ALWAYS_ON, RP::PIN_ALWAYS_ON_12, RP::PIN_TOGGLE_NEXT, RP::PIN_TOGGLE_PREV,
+    RP::PIN_FLOW_1, RP::PIN_FLOW_2, RP::PIN_SWITCH_MANUAL, RP::PIN_NEXT, RP::PIN_PREV
+  };
+  for (size_t k=0;k<sizeof(extras)/sizeof(extras[0]);++k){
+    int p = extras[k];
+    if (p>=0 && !vecContains_(pins,p) && !isFlashPin_(p)) pins.push_back(p);
+  }
+
+  s += F("<h3>GPIO (dirección y nivel)</h3>");
+  s += F("<p><small>La <b>dirección</b> se infiere por el <i>rol</i> configurado en el proyecto (MAIN/SEC y salidas auxiliares = OUT; botones, switch y caudalímetros = IN). "
+         "El <b>nivel</b> es lectura directa de <code>digitalRead()</code>. "
+         "“Interpretación” usa ActiveLow para MAIN/SEC.</small></p>");
+  s += F("<table><tr><th>GPIO</th><th>Rol</th><th>Dir</th><th>Nivel</th><th>AL</th><th>Interpretación</th></tr>");
+
+  for (int pin : pins) {
+    String dir = dirOf_(pin);
+    int level = digitalRead(pin); // seguro para IN y OUT
+
+    bool hasAL=false, al=false;
+    String role = roleOf_(pin, hasAL, al);
+
+    s += F("<tr><td><code>");
+    s += String(pin);
+    s += F("</code></td><td>");
+    s += role;
+    s += F("</td><td>");
+    s += dir;
+    s += F("</td><td>");
+    s += (level==HIGH ? F("HIGH") : F("LOW"));
+    s += F("</td><td>");
+    if (hasAL)   s += (al ? F("AL") : F("AH"));
+    else         s += F("—");
+    s += F("</td><td>");
+    s += interpFromAL_(level, hasAL, al);
+    s += F("</td></tr>");
+  }
+  s += F("</table>");
+
   s += htmlFooter();
   server_.send(200, F("text/html; charset=utf-8"), s);
 }
