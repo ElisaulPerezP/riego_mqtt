@@ -157,8 +157,12 @@ private:
   void handleStepsPage();             // vista de pasos (StepSet 0)
   void handleStepsSave();             // guardar pasos
 
+  // ======= Modo =======
   void handleMode();
   void handleModeSet();
+  void handleModeManualStart();   // <-- NUEVO (declarado)
+  void handleModeManualStop();    // <-- NUEVO (declarado)
+
 private:
   WebServer&        server_;
   MqttChat&         chat_;

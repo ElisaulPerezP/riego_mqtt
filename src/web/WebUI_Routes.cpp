@@ -1,6 +1,7 @@
 // File: src/web/WebUI_Routes.cpp
 #include "web/WebUI.h"
 
+// =================== Rutas ===================
 void WebUI::begin() {
   // Home + Wi-Fi
   server_.on("/",               HTTP_GET,  [this]{ handleRoot(); });
@@ -16,30 +17,36 @@ void WebUI::begin() {
   server_.on("/mqtt/publish",   HTTP_POST, [this]{ handleMqttPublish(); });
   server_.on("/mqtt/poll",      HTTP_GET,  [this]{ handleMqttPoll(); });
 
-  // Modo
-  server_.on("/mode",           HTTP_GET,  [this]{ handleMode(); });
-  server_.on("/mode/set",       HTTP_POST, [this]{ handleModeSet(); });
+  // ====== MODO (Manual/Auto con override software) ======
+  server_.on("/mode",                 HTTP_GET,  [this]{ handleMode(); });
+  server_.on("/mode/set",             HTTP_POST, [this]{ handleModeSet(); });
+  server_.on("/mode/manual/start",    HTTP_POST, [this]{ handleModeManualStart(); });
+  server_.on("/mode/manual/stop",     HTTP_POST, [this]{ handleModeManualStop(); });
 
   // Riego (placeholder)
   server_.on("/riego",          HTTP_GET,  [this]{ handleIrrigation(); });
   server_.on("/riego.json",     HTTP_GET,  [this]{ handleIrrigationJson(); });
 
-  // Estados
+  // ====== ESTADOS ======
   server_.on("/states",         HTTP_GET,  [this]{ handleStatesList(); });
   server_.on("/states/save",    HTTP_POST, [this]{ handleStatesSave(); });
   server_.on("/states/delete",  HTTP_POST, [this]{ handleStatesDelete(); });
 
-  // Detalle zona
+  // ====== DETALLE DE ZONA ======
   server_.on("/states/edit",        HTTP_GET,  [this]{ handleStateEdit();      });
   server_.on("/states/edit/save",   HTTP_POST, [this]{ handleStateEditSave();  });
 
   server_.onNotFound([this]{ server_.send(404, F("text/plain"), F("404")); });
+
   server_.begin();
 }
 
-void WebUI::loop() { server_.handleClient(); }
+void WebUI::loop() {
+  server_.handleClient();
+}
 
 void WebUI::attachMqttSink() {
+  // Recibe mensajes de MQTT y los empuja al buffer para /mqtt/poll
   chat_.onMessage([this](const String& t, const String& p){ pushMsg_(t, p); });
   chat_.subscribe();
 }

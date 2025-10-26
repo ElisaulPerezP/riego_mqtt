@@ -5,6 +5,7 @@
 #include "../hw/PinMap.h"
 #include "../hw/RelayBank.h"
 #include "../schedule/IrrigationSchedule.h"
+#include "../state/RelayState.h"
 #include <vector>
 
 // -------------------- Pines/const originales --------------------
@@ -129,10 +130,15 @@ void runBlinkMode()   { ensureProgramInit(); autoMode.run(); }
 
 AutoMode::Tele getAutoTelemetry() { return autoMode.telemetry(); }
 
-// NUEVO: el main llama esto tras guardar/editar en WebUI
+// El main llama esto tras guardar/editar en WebUI
 void modesSetProgram(const ProgramSpec& p, const FlowCalibration& c) {
   gProg = p;             // copiamos (vive dentro de este módulo)
   gCal  = c;
   gProgInit = true;      // ya tenemos un programa real
   autoMode.setSchedule(&gProg, &gCal);
 }
+
+// -------------------- Control manual desde Web (latch de RelayState) --------------------
+void manualWeb_startState(const RelayState& rs) { manualMode.webStartState(rs); }
+void manualWeb_stopState()                      { manualMode.webStopState();    }
+bool manualWeb_isActive()                       { return manualMode.webIsActive(); }

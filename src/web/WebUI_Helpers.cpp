@@ -1,4 +1,4 @@
-// File: src/web/WebUI_Hellers.cpp
+// File: src/web/WebUI_Helpers.cpp
 #include "web/WebUI.h"
 #include <WiFi.h>
 
@@ -23,13 +23,21 @@ String WebUI::htmlHeader(const String& title) const {
   s += F("<p>AP: <b>config</b> · mDNS: <a href='http://config.local/'>config.local</a></p>");
   s += F("<p>IP AP: <code>");  s += ipAP;  s += F("</code><br>");
   s += F("IP LAN (STA): <code>"); s += ipSTA; s += F("</code></p>");
-  s += F("<nav><a href='/'>Home</a> · <a href='/states'>Estados</a> · <a href='/mode'>Modo</a> · "
-         "<a href='/wifi/info'>WiFi</a> · <a href='/wifi/scan'>Escanear</a> · "
-         "<a href='/wifi/saved'>Guardadas</a> · <a href='/mqtt'>MQTT</a></nav><hr/>");
+  s += F("<nav>"
+        "<a href='/'>Home</a> · "
+        "<a href='/states'>Estados</a> · "
+        "<a href='/mode'>Modo</a> · "
+        "<a href='/wifi/info'>WiFi</a> · "
+        "<a href='/wifi/scan'>Escanear</a> · "
+        "<a href='/wifi/saved'>Guardadas</a> · "
+        "<a href='/mqtt'>MQTT</a>"
+        "</nav><hr/>");
   return s;
 }
 
-String WebUI::htmlFooter() const { return F("<hr/><small>WebUI minimal · ESP32</small></body></html>"); }
+String WebUI::htmlFooter() const {
+  return F("<hr/><small>WebUI minimal · ESP32</small></body></html>");
+}
 
 String WebUI::jsonEscape(String s) {
   s.replace("\\","\\\\");
@@ -38,11 +46,4 @@ String WebUI::jsonEscape(String s) {
   s.replace("\n","\\n");
   s.replace("\t","\\t");
   return s;
-}
-
-void WebUI::pushMsg_(const String& t, const String& p) {
-  Msg& m = inbox_[writePos_];
-  m.topic = t; m.payload = p; m.ms = millis(); m.seq = ++seqCounter_;
-  writePos_ = (writePos_ + 1) % MSG_BUF;
-  if (used_ < MSG_BUF) used_++;
 }
