@@ -3,7 +3,9 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <vector>
-#include "hw/RelayPins.h"     // mapa de pines del proyecto
+#include <time.h>              // hora local
+#include "../time/TimeSync.h"  // getTimeSyncInfo()
+#include "hw/RelayPins.h"      // mapa de pines del proyecto
 
 /* ================= Helpers GPIO (solo para Home) ================= */
 
@@ -59,15 +61,27 @@ static String dirOf_(int pin) {
   return F("—");
 }
 
-// Asegura que los pines marcados como ENTRADA estén configurados con pulls correctos
-// para poder LEERLOS de forma estable en la vista Home, sin depender del modo activo.
+// Formatea “hace Xh Ym Zs” a partir de milisegundos
+static String fmtSinceMs_(uint32_t ms) {
+  uint32_t s = ms / 1000;
+  uint32_t h = s / 3600;
+  uint32_t m = (s % 3600) / 60;
+  uint32_t ss = s % 60;
+  String out;
+  if (h) { out += String(h) + F("h "); }
+  if (h || m) { out += String(m) + F("m "); }
+  out += String(ss) + F("s");
+  return out;
+}
+
+// Asegura que los pines ENTRADA tengan pulls correctos para LEER en Home
 static void ensureInputReadConfig_() {
   if (RP::PIN_SWITCH_MANUAL >= 0) pinMode(RP::PIN_SWITCH_MANUAL, INPUT_PULLDOWN);
   if (RP::PIN_NEXT          >= 0) pinMode(RP::PIN_NEXT,          INPUT_PULLUP);
   if (RP::PIN_PREV          >= 0) pinMode(RP::PIN_PREV,          INPUT_PULLDOWN);
-  // Los caudalímetros suelen ir con pull-up interno:
-  if (RP::PIN_FLOW_1        >= 0) pinMode(RP::PIN_FLOW_1,        INPUT_PULLUP);
-  if (RP::PIN_FLOW_2        >= 0) pinMode(RP::PIN_FLOW_2,        INPUT_PULLUP);
+  // Caudalímetros (pull-up externo): INPUT “flotante” sin PULL interno
+  if (RP::PIN_FLOW_1        >= 0) pinMode(RP::PIN_FLOW_1,        INPUT);
+  if (RP::PIN_FLOW_2        >= 0) pinMode(RP::PIN_FLOW_2,        INPUT);
 }
 
 /* ====================== HOME ====================== */
@@ -81,8 +95,142 @@ void WebUI::handleRoot() {
   s += F("<li><a href='/wifi/saved'>Redes guardadas / autoconexión</a></li>");
   s += F("<li><a href='/mqtt'>MQTT (config, estado, chat)</a></li></ul>");
 
-  // Antes de leer, garantizamos configuración estable de ENTRADAS
+  // Configura entradas antes de leer el switch físico
   ensureInputReadConfig_();
+
+  // ====== Bloque: Estado de modo + Hora local + Próxima ventana ======
+  {
+    // --- Modo desde NVS (override/software) ---
+    bool ovr=false, manual=false;
+    {
+      Preferences p;
+      if (p.begin(NS_MODE, /*ro*/ true)) {
+        ovr    = p.getUChar("ovr", 0) != 0;
+        manual = p.getUChar("manual", 0) != 0;
+        p.end();
+      }
+    }
+    // --- Modo desde hardware (switch físico): HIGH=MANUAL, LOW=AUTO ---
+    bool hwManual = false;
+    if (RP::PIN_SWITCH_MANUAL >= 0) hwManual = (digitalRead(RP::PIN_SWITCH_MANUAL) == HIGH);
+
+    // --- Modo efectivo ---
+    bool effManual = ovr ? manual : hwManual;
+
+    // --- Hora local (Bogotá configurada por TimeSync) ---
+    time_t nowEpoch = time(nullptr);
+    struct tm lt;
+    bool timeValid = (nowEpoch > 100000) && localtime_r(&nowEpoch, &lt);
+
+    char nowBuf[32] = "-";
+    if (timeValid) {
+      strftime(nowBuf, sizeof(nowBuf), "%Y-%m-%d %H:%M:%S", &lt);
+    }
+
+    // --- Info de sincronización (hace cuánto) ---
+    TimeSyncInfo tsi = getTimeSyncInfo();
+    String lastSyncTxt = F("—");
+    if (tsi.lastSyncMillis != 0) {
+      uint32_t age = millis() - tsi.lastSyncMillis;
+      lastSyncTxt = fmtSinceMs_(age) + F(" atrás");
+    } else {
+      lastSyncTxt = F("nunca");
+    }
+
+    // --- Ventanas desde NVS (NS_WINDOWS="windows") ---
+    struct Win { uint8_t sh, sm, eh, em; };
+    std::vector<Win> wins;
+    {
+      Preferences p;
+      if (p.begin(NS_WINDOWS, /*ro*/ true)) {
+        uint8_t cnt = p.getUChar("count", 0);
+        for (uint8_t i = 0; i < cnt && i < 60; ++i) {
+          Win w;
+          w.sh = p.getUChar((String("w")+i+"_sh").c_str(), 0);
+          w.sm = p.getUChar((String("w")+i+"_sm").c_str(), 0);
+          w.eh = p.getUChar((String("w")+i+"_eh").c_str(), 0);
+          w.em = p.getUChar((String("w")+i+"_em").c_str(), 0);
+          int smin = (int)w.sh*60 + (int)w.sm;
+          int emin = (int)w.eh*60 + (int)w.em;
+          if (smin < emin) wins.push_back(w); // solo rangos válidos en el mismo día
+        }
+        p.end();
+      }
+    }
+
+    String nextText = F("Sin franjas configuradas");
+    if (timeValid && !wins.empty()) {
+      int md = lt.tm_hour * 60 + lt.tm_min;  // minuto del día
+      bool inside = false;
+      int  curEnd = 1e9;
+      int  nextStart = 1e9;
+      int  firstStart = 1e9;
+
+      for (const auto& w : wins) {
+        int smin = (int)w.sh*60 + (int)w.sm;
+        int emin = (int)w.eh*60 + (int)w.em;
+        if (smin < firstStart) firstStart = smin;
+        if (md >= smin && md < emin) { inside = true; if (emin < curEnd) curEnd = emin; }
+        if (smin > md && smin < nextStart) nextStart = smin;
+      }
+      // Si no hay otra ventana hoy, la próxima es mañana al primer inicio
+      if (nextStart == 1e9) nextStart = firstStart + 1440;
+
+      int deltaMin = nextStart - md;
+      if (deltaMin < 0) deltaMin += 1440; // seguridad
+
+      int nsH = (nextStart % 1440) / 60;
+      int nsM = (nextStart % 1440) % 60;
+
+      char hhmm[6];
+      snprintf(hhmm, sizeof(hhmm), "%02d:%02d", nsH, nsM);
+
+      int dh = deltaMin / 60;
+      int dm = deltaMin % 60;
+
+      nextText = String(F("<b>Próxima ventana:</b> ")) + hhmm + F(" (en ");
+      if (dh > 0) { nextText += String(dh) + F("h "); }
+      nextText += String(dm) + F("m)");
+
+      if (inside) {
+        int rem = curEnd - md;
+        if (rem < 0) rem = 0;
+        int rh = rem / 60, rm = rem % 60;
+        nextText += F(" &nbsp;|&nbsp; <b>Ahora en ventana</b> (termina en ");
+        if (rh > 0) nextText += String(rh) + F("h ");
+        nextText += String(rm) + F("m)");
+      }
+    } else if (!timeValid) {
+      nextText = F("Hora no sincronizada");
+    }
+
+    // --- Render tarjeta de estado ---
+    s += F("<div class='formcard'><h4>Estado del sistema</h4><p>");
+    s += F("Modo efectivo: <b>");
+    s += effManual ? F("MANUAL") : F("AUTOMÁTICO");
+    s += F("</b><br/>");
+
+    s += F("Fuente de modo: ");
+    s += ovr ? F("<b>Software (override activo)</b>") : F("<b>Hardware (switch físico)</b>");
+    s += F("<br/>");
+
+    s += F("Selección SW: ");
+    s += manual ? F("MANUAL") : F("AUTOMÁTICO");
+    s += F(" &nbsp; | &nbsp; Switch HW: ");
+    s += hwManual ? F("MANUAL") : F("AUTOMÁTICO");
+    s += F("<br/>");
+
+    s += F("Hora local: <b>");
+    s += String(nowBuf);
+    s += F("</b><br/>");
+
+    s += F("Última sincronización NTP: ");
+    s += lastSyncTxt;
+    s += F("<br/>");
+
+    s += nextText;
+    s += F("</p></div>");
+  }
 
   // ================= Tabla GPIO =================
   // Conjunto de pines relevantes del proyecto (evitamos 6..11 por flash)
