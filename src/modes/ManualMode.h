@@ -1,12 +1,11 @@
 #pragma once
 #include <Arduino.h>
-#include "modes/IMode.h"
-#include "hw/RelayBank.h"
-#include "../state/RelayState.h"   // <-- para aplicar estados /states
+#include "../hw/RelayBank.h"
+#include "../state/RelayState.h"
 
-class ManualMode : public IMode {
+class ManualMode {
 public:
-  struct Pins { uint8_t pinNext; uint8_t pinPrev; };
+  struct Pins { int pinNext; int pinPrev; };
 
   ManualMode(RelayBank& bank,
              const Pins& pins,
@@ -18,76 +17,91 @@ public:
              int pinFlow1 = -1,
              int pinFlow2 = -1);
 
-  void begin() override;
-  void run()   override;
-  void reset() override;
+  // ciclo de vida
+  void begin();
+  void reset();
+  void run();
 
-  // ===== Control manual “desde Web” basado en RelayState =====
-  void webStartState(const RelayState& rs); // aplica máscaras y activa “latch”
-  void webStopState();                      // apaga latch y libera
+  // Latch manual por Web
+  void webStartState(const RelayState& rs);
+  void webStopState();
   bool webIsActive() const { return webActive_; }
 
+  // Telemetría cruda (pulsos y tiempo desde el último cambio de zona)
+  bool telemetryRaw(uint32_t& d1, uint32_t& d2, uint32_t& elapsedMs, int& stateIdx, bool& active) const;
+
+  // --- Arrays de mapeo HW (definidos en .cpp) ---
+  static const uint8_t MAIN_PINS_[12];
+  static const bool    MAIN_AL_[12];
+  static const uint8_t SEC_PINS_[2];
+  static const bool    SEC_AL_[2];
+
 private:
-  // --- helpers legacy (igual que los que ya tenías) ---
+  // helpers HW
   void allMainsOff();
   void allSecsOff();
   void applyMainsPattern(int m, bool direct);
   void smoothTransitionTo(int idx);
 
-  // --- helpers Web ---
+  // latch Web/hard
   void applyRelayState_(const RelayState& rs);
-
-  // ISR caudal (por si quieres mostrar volumen luego)
   void attachFlowIsr_();
   void detachFlowIsr_();
+
+  // ISRs caudal
   static void IRAM_ATTR isrFlow1_();
   static void IRAM_ATTR isrFlow2_();
 
-  // Dependencias/config
-  RelayBank&       bank_;
-  Pins             pins_;
-  const int*       customStates_;
-  const int        numCustomStates_;
-  const unsigned long debounceMs_;
-  const unsigned long longPressMs_;
-  const unsigned long stepDelayMs_;
-  const int        pinFlow1_;
-  const int        pinFlow2_;
+private:
+  // Config constante
+  static constexpr int NUM_MAINS_ = 12;
+  static constexpr int NUM_SECS_  = 2;
+  static constexpr int PIN_ALWAYS_ON_    = 33;
+  static constexpr int PIN_ALWAYS_ON_12_ = 12;
+  static constexpr unsigned long SAFE_BOOT_MS_ = 100;     // ventana de arranque
+  static constexpr unsigned long DEBOUNCE_US_  = 300;     // anti-rebote caudalímetros
 
-  // Estado legacy (botones)
-  bool initialized_             = false;
-  int  customStateIndex_        = 0;
-  bool lastNextRaw_             = false;
-  bool lastPrevRaw_             = false;
-  bool nextLongHandled_         = false;
-  bool prevLongHandled_         = false;
-  unsigned long lastNextChange_ = 0;
-  unsigned long lastPrevChange_ = 0;
-  unsigned long nextPressStart_ = 0;
-  unsigned long prevPressStart_ = 0;
-  bool toggleNextState_         = false;
-  bool togglePrevState_         = false;
+  RelayBank& bank_;
+  Pins       pins_;
+  const int* customStates_ = nullptr;
+  int        numCustomStates_ = 0;
+  unsigned long debounceMs_   = 100;
+  unsigned long longPressMs_  = 5000;
+  unsigned long stepDelayMs_  = 500;
 
-  // Mapeo de pines (idéntico a tu implementación actual)
-  static const uint8_t MAIN_PINS_[12];
-  static const bool    MAIN_AL_[12];
-  static const uint8_t SEC_PINS_[2];
-  static const bool    SEC_AL_[2];
-  static const uint8_t PIN_ALWAYS_ON_    = 33;
-  static const uint8_t PIN_ALWAYS_ON_12_ = 12;
-  static const int NUM_MAINS_ = 12;
-  static const int NUM_SECS_  = 2;
-  static const unsigned long SAFE_BOOT_MS_ = 400;
+  // Pines caudal
+  int pinFlow1_ = -1;
+  int pinFlow2_ = -1;
 
-  // ===== Latch manual Web =====
-  bool     webActive_  = false;
+  // Estado
+  bool initialized_ = false;
+
+  // botones HW (next/prev)
+  bool     lastNextRaw_ = false, lastPrevRaw_ = false;
+  uint32_t lastNextChange_ = 0, lastPrevChange_ = 0;
+  uint32_t nextPressStart_ = 0, prevPressStart_ = 0;
+  bool     nextLongHandled_ = false, prevLongHandled_ = false;
+
+  // toggles hacia RelayBank (fert/alarma)
+  bool toggleNextState_ = false, togglePrevState_ = false;
+
+  // índice de estado activo por HW
+  int customStateIndex_ = 0;
+
+  // latch Web
   RelayState webState_;
-  uint32_t webStartMs_ = 0;
+  bool       webActive_ = false;
 
-  // ISR caudal (opcional)
+  // ISR flujo (compartidos)
   static volatile unsigned long pulses1_;
   static volatile unsigned long pulses2_;
   static volatile unsigned long lastUs1_;
   static volatile unsigned long lastUs2_;
-  static constexpr unsigned long DEBOUNCE_US_ = 5000UL;
+
+  // control de attach para no duplicar
+  bool flowIsrAttached_ = false;
+
+  // base de medición (reinicia al cambiar de zona o al iniciar por Web)
+  uint32_t p1Start_ = 0, p2Start_ = 0;
+  uint32_t zoneStartMs_ = 0;
 };

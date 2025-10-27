@@ -1,12 +1,12 @@
-#include "modes/ManualMode.h"
+#include "ManualMode.h"
 
-// Arrays estáticos (reordenados EXACTO al README)
+// Arrays estáticos (orden EXACTO al README)
 const uint8_t ManualMode::MAIN_PINS_[12] = { 0, 2, 5, 15, 16, 17, 1, 3, 18, 21, 22, 23 };
 const bool    ManualMode::MAIN_AL_[12]   = { 1, 1, 1,  1,  1,  1, 1, 1,  1,  1,  1,  1 };
 const uint8_t ManualMode::SEC_PINS_[2]   = { 26, 27 };
 const bool    ManualMode::SEC_AL_[2]     = { 0,  0 };
 
-// ISR caudal
+// ISR caudal (compartidos)
 volatile unsigned long ManualMode::pulses1_ = 0;
 volatile unsigned long ManualMode::pulses2_ = 0;
 volatile unsigned long ManualMode::lastUs1_ = 0;
@@ -60,7 +60,13 @@ void ManualMode::smoothTransitionTo(int idx) {
   digitalWrite(PIN_ALWAYS_ON_12_, LOW);
   delay(stepDelayMs_);
 
-  if (idx == OFF_IDX) return;
+  if (idx == OFF_IDX) {
+    // Reinicia medición incluso si apagamos todo
+    attachFlowIsr_();
+    noInterrupts(); p1Start_ = pulses1_; p2Start_ = pulses2_; interrupts();
+    zoneStartMs_ = millis();
+    return;
+  }
 
   digitalWrite(PIN_ALWAYS_ON_,    HIGH);
   digitalWrite(PIN_ALWAYS_ON_12_, HIGH);
@@ -82,16 +88,23 @@ void ManualMode::smoothTransitionTo(int idx) {
     digitalWrite(SEC_PINS_[0], SEC_AL_[0]? LOW:HIGH);
   }
   delay(stepDelayMs_);
+
+  // Reinicia medición al cambiar de zona (HW)
+  attachFlowIsr_();
+  noInterrupts(); p1Start_ = pulses1_; p2Start_ = pulses2_; interrupts();
+  zoneStartMs_ = millis();
 }
 
 // ---------------- ciclo de vida ----------------
 void ManualMode::begin() {
+  // Fase segura: pines como INPUT_PULLUP y espera
   for (int i=0;i<NUM_MAINS_;++i) pinMode(MAIN_PINS_[i], INPUT_PULLUP);
   for (int j=0;j<NUM_SECS_; ++j) pinMode(SEC_PINS_[j],  INPUT_PULLUP);
   pinMode(PIN_ALWAYS_ON_,    INPUT_PULLUP);
   pinMode(PIN_ALWAYS_ON_12_, INPUT_PULLUP);
   delay(SAFE_BOOT_MS_);
 
+  // Ahora salidas
   for (int i=0;i<NUM_MAINS_;++i) pinMode(MAIN_PINS_[i], OUTPUT);
   for (int j=0;j<NUM_SECS_; ++j) pinMode(SEC_PINS_[j],  OUTPUT);
   pinMode(PIN_ALWAYS_ON_,    OUTPUT);
@@ -114,6 +127,10 @@ void ManualMode::begin() {
   bank_.setToggleNext(false);
   bank_.setTogglePrev(false);
 
+  attachFlowIsr_();
+  noInterrupts(); p1Start_ = pulses1_; p2Start_ = pulses2_; interrupts();
+  zoneStartMs_ = millis();
+
   initialized_ = true;
 }
 
@@ -127,18 +144,25 @@ void ManualMode::reset() {
   toggleNextState_ = togglePrevState_ = false;
   bank_.setToggleNext(false);
   bank_.setTogglePrev(false);
-  webStopState(); // por si estaba activo el latch
+  webStopState(); // suelta latch si estaba activo
+
+  attachFlowIsr_();
+  noInterrupts(); p1Start_ = pulses1_; p2Start_ = pulses2_; interrupts();
+  zoneStartMs_ = millis();
 }
 
-// ----------- Web latch ----------
+// ----------- Latch Web ----------
 void ManualMode::attachFlowIsr_() {
-  // Pull-up externo según README -> INPUT (sin PULLUP interno)
+  if (flowIsrAttached_) return;
   if (pinFlow1_>=0) { pinMode(pinFlow1_, INPUT); attachInterrupt(digitalPinToInterrupt(pinFlow1_), isrFlow1_, RISING); }
   if (pinFlow2_>=0) { pinMode(pinFlow2_, INPUT); attachInterrupt(digitalPinToInterrupt(pinFlow2_), isrFlow2_, RISING); }
+  flowIsrAttached_ = true;
 }
 void ManualMode::detachFlowIsr_() {
+  if (!flowIsrAttached_) return;
   if (pinFlow1_>=0) detachInterrupt(digitalPinToInterrupt(pinFlow1_));
   if (pinFlow2_>=0) detachInterrupt(digitalPinToInterrupt(pinFlow2_));
+  flowIsrAttached_ = false;
 }
 
 void ManualMode::applyRelayState_(const RelayState& rs) {
@@ -164,17 +188,15 @@ void ManualMode::webStartState(const RelayState& rs) {
   webState_ = rs;
   applyRelayState_(webState_);
 
-  noInterrupts(); pulses1_=pulses2_=0; lastUs1_=lastUs2_=micros(); interrupts();
-  webStartMs_ = millis();
-
   attachFlowIsr_();
+  noInterrupts(); p1Start_ = pulses1_; p2Start_ = pulses2_; lastUs1_=lastUs2_=micros(); interrupts();
+  zoneStartMs_ = millis();
   webActive_ = true;
 }
 
 void ManualMode::webStopState() {
   if (!webActive_) return;
-  detachFlowIsr_();
-  // No forzamos apagar mains/secs aquí (queremos un STOP “limpio”).
+  // Mantener ISR adjunta para que un cambio por HW siga midiendo
   webActive_ = false;
 }
 
@@ -183,7 +205,8 @@ void ManualMode::run() {
   if (!initialized_) { begin(); return; }
 
   if (webActive_) {
-    // Latch: mantener estado aplicado
+    // Latch: mantener estado aplicado (sin lógica adicional)
+    applyRelayState_(webState_);
     return;
   }
 
@@ -220,4 +243,17 @@ void ManualMode::run() {
       smoothTransitionTo(customStates_[customStateIndex_]);
     }
   }
+}
+
+// ---------------- Telemetría ----------------
+bool ManualMode::telemetryRaw(uint32_t& d1, uint32_t& d2, uint32_t& elapsedMs, int& stateIdx, bool& active) const {
+  unsigned long p1, p2;
+  noInterrupts(); p1 = pulses1_; p2 = pulses2_; interrupts();
+
+  d1 = (uint32_t)(p1 - p1Start_);
+  d2 = (uint32_t)(p2 - p2Start_);
+  elapsedMs = zoneStartMs_ ? (millis() - zoneStartMs_) : 0;
+  stateIdx = (customStates_ && numCustomStates_>0) ? customStateIndex_ : -1;
+  active = webActive_ || (customStates_ && numCustomStates_>0);
+  return true;
 }

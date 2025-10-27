@@ -1,3 +1,4 @@
+// File: src/modes/modes.cpp
 #include "modes.h"
 #include "ManualMode.h"
 #include "AutoMode.h"
@@ -6,6 +7,7 @@
 #include "../schedule/IrrigationSchedule.h"
 #include "../state/RelayState.h"
 #include <vector>
+#include <math.h>   // lroundf
 
 // -------------------- Pines/const originales --------------------
 namespace FULL {
@@ -31,7 +33,7 @@ namespace FULL {
   static const bool SEC_ACTIVE_LOW[]  = { 0, 0 };
   static const int  NUM_SECS          = sizeof(SEC_PINS)/sizeof(SEC_PINS[0]);
 
-  // Mantengo tu tabla de estados personalizada (índices [0..NUM_MAINS*2])
+  // Tabla de estados personalizada (índices [0..NUM_MAINS*2])
   static const int CUSTOM_STATES[] = {
      15,17,3,1,11,9,7,13,19,5,23,21,
       8,12,16,
@@ -81,9 +83,12 @@ static const PinMap pinmapFull = {
 static RelayBank relayFull(pinmapFull);
 
 static ManualMode::Pins fullPins = { FULL::PIN_NEXT, FULL::PIN_PREV };
-static ManualMode manualMode(relayFull, fullPins,
-                             FULL::CUSTOM_STATES, FULL::NUM_CUSTOM_STATES,
-                             FULL::DEBOUNCE_MS, FULL::LONGPRESS_MS, FULL::STEP_MS);
+static ManualMode manualMode(
+  relayFull, fullPins,
+  FULL::CUSTOM_STATES, FULL::NUM_CUSTOM_STATES,
+  FULL::DEBOUNCE_MS, FULL::LONGPRESS_MS, FULL::STEP_MS,
+  BLINK::PIN_FLOW_1, BLINK::PIN_FLOW_2   // <<< ACTIVAR MEDICIÓN DE CAUDAL EN MODO MANUAL
+);
 
 static const PinMap pinmapBlink = {
   BLINK::MAIN_PINS, BLINK::MAIN_ACTIVE_LOW, (int)(sizeof(BLINK::MAIN_PINS)/sizeof(int)),
@@ -151,10 +156,35 @@ void manualWeb_startState(const RelayState& rs) { manualMode.webStartState(rs); 
 void manualWeb_stopState()                      { manualMode.webStopState();    }
 bool manualWeb_isActive()                       { return manualMode.webIsActive(); }
 
-// -------------------- NUEVO: cableado de callbacks --------------------
+// -------------------- Callbacks hacia AutoMode --------------------
 void modesSetEventPublisher(AutoMode::EventPublisher pub, const String& topic) {
   autoMode.setEventPublisher(pub, topic);
 }
 void modesSetStateNameResolver(AutoMode::StateNameResolver res) {
   autoMode.setStateNameResolver(res);
+}
+
+// ================== Telemetría MANUAL ==================
+static inline uint32_t mlFromPulses_(uint32_t p1, uint32_t p2) {
+  if (gCal.pulsesPerMl1 <= 0.f && gCal.pulsesPerMl2 <= 0.f) {
+    return p1 + p2; // “bruto” si no hay cal
+  }
+  float ml1 = (gCal.pulsesPerMl1 > 0.f) ? (float)p1 / gCal.pulsesPerMl1 : 0.f;
+  float ml2 = (gCal.pulsesPerMl2 > 0.f) ? (float)p2 / gCal.pulsesPerMl2 : 0.f;
+  float ml  = ml1 + ml2;
+  if (ml < 0) ml = 0;
+  return (uint32_t)lroundf(ml);
+}
+
+ManualTelemetry modesGetManualTelemetry() {
+  ManualTelemetry out{};
+  uint32_t d1=0, d2=0, elapsed=0; int idx=-1; bool active=false;
+
+  if (manualMode.telemetryRaw(d1, d2, elapsed, idx, active)) {
+    out.active     = active;
+    out.elapsedMs  = elapsed;
+    out.volumeMl   = mlFromPulses_(d1, d2);
+    out.stateIndex = idx;
+  }
+  return out;
 }
