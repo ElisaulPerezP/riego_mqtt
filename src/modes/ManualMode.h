@@ -89,5 +89,5 @@ private:
   static volatile unsigned long pulses2_;
   static volatile unsigned long lastUs1_;
   static volatile unsigned long lastUs2_;
-  static constexpr unsigned long DEBOUNCE_US_ = 50000UL;
+  static constexpr unsigned long DEBOUNCE_US_ = 5000UL;
 };

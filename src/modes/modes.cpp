@@ -74,7 +74,7 @@ namespace BLINK {
 // -------------------- Objetos --------------------
 static const PinMap pinmapFull = {
   FULL::MAIN_PINS, FULL::MAIN_ACTIVE_LOW, (int)(sizeof(FULL::MAIN_PINS)/sizeof(int)),
-  FULL::SEC_PINS,  FULL::SEC_ACTIVE_LOW,  (int)(sizeof(FULL::SEC_PINS)/sizeof(int)),
+  FULL::SEC_PINS,  FULL::SEC_ACTIVE_LOW,  (int)(sizeof(FULL::SEC_PINS)/sizeof(FULL::SEC_PINS[0])),
   FULL::PIN_ALWAYS_ON, FULL::PIN_ALWAYS_ON_12,
   FULL::PIN_TOGGLE_NEXT, FULL::PIN_TOGGLE_PREV
 };
@@ -150,3 +150,11 @@ void modesSetProgram(const ProgramSpec& p, const FlowCalibration& c) {
 void manualWeb_startState(const RelayState& rs) { manualMode.webStartState(rs); }
 void manualWeb_stopState()                      { manualMode.webStopState();    }
 bool manualWeb_isActive()                       { return manualMode.webIsActive(); }
+
+// -------------------- NUEVO: cableado de callbacks --------------------
+void modesSetEventPublisher(AutoMode::EventPublisher pub, const String& topic) {
+  autoMode.setEventPublisher(pub, topic);
+}
+void modesSetStateNameResolver(AutoMode::StateNameResolver res) {
+  autoMode.setStateNameResolver(res);
+}

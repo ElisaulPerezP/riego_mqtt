@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <vector>
 #include <time.h>
+#include <functional>
 
 #include "../hw/RelayBank.h"
 #include "IMode.h"
@@ -58,6 +59,13 @@ public:
   };
   Tele telemetry() const;
 
+  // ====== Callbacks para publicar eventos y resolver nombres ======
+  using EventPublisher     = std::function<void(const String& topic, const String& payload)>;
+  using StateNameResolver  = std::function<String(int stepIdx)>; // stepIdx dentro del set activo
+
+  void setEventPublisher(EventPublisher pub, const String& topic);
+  void setStateNameResolver(StateNameResolver res);
+
 private:
   // ISR caudal
   static void IRAM_ATTR isrFlow1Thunk();
@@ -86,8 +94,21 @@ private:
   uint32_t volumeMlFromPulses_(uint32_t d1, uint32_t d2) const;
   uint32_t computeNextStartEpoch_() const;
 
-  // ====== NUEVO: semáforo por Franjas (/windows en NVS) ======
+  // ====== Franjas (/windows en NVS) ======
   bool allowedNowByWindows_() const;   // true si hora actual cae en alguna franja válida
+
+  // ====== helpers para ventana + timestamps + JSON ======
+  bool   computeCurrentWindow_(int& sminOut, int& eminOut, time_t& startEpochOut, time_t& endEpochOut, String& nameOut) const;
+  static String two_(int v);
+  static String hhmm_(int minuteOfDay);
+  static String isoLocal_(time_t epoch);
+  static String jsonEscape_(const String& s);
+
+  void   publishStateStart_(size_t stepIdx, uint32_t durMsTarget, uint32_t volMlTarget);
+  void   publishStateEnd_  (size_t stepIdx, uint32_t durMsReal,    uint32_t volMlReal);
+
+  // ====== NVS zonas (targets efectivos por zona) ======
+  static bool readZoneTargetsNVS_(int zoneIdx, uint32_t& volMlOut, uint32_t& timeMsOut);
 
 private:
   // Dependencias
@@ -95,7 +116,7 @@ private:
   const int*      customStates_;
   const int       numStates_;
   const unsigned long stateDurMs_;
-  const unsigned long offDurMs_;
+  const unsigned long offDurationMs_;
   const unsigned long stepDelayMs_;
   const int       pinFlow1_;
   const int       pinFlow2_;
@@ -105,7 +126,7 @@ private:
   volatile static unsigned long pulse2_;
   volatile static unsigned long lastMicros1_;
   volatile static unsigned long lastMicros2_;
-  static const unsigned long DEBOUNCE_US = 50000UL;
+  static const unsigned long DEBOUNCE_US = 5000UL;
 
   // Legacy blink
   bool      initialized_   = false;
@@ -138,4 +159,19 @@ private:
   // Anti-redoble
   int lastStartYDay_ = -1;
   int lastStartMin_  = -1;
+
+  // Publicación y nombres
+  EventPublisher    publisher_  = nullptr;
+  String            pubTopic_   = "public/riegoArandanosDeMiPueblo";
+  StateNameResolver nameRes_    = nullptr;
+
+  // Ventana actual (caché para mensajes)
+  bool   haveCurWindow_         = false;
+  time_t curWindowStartEpoch_   = 0;
+  time_t curWindowEndEpoch_     = 0;
+  String curWindowName_;
+
+  // ====== Targets efectivos (lo que realmente se usa) ======
+  uint32_t effDurMs_ = 0;   // tiempo objetivo del paso (zona) en ms; 0 = sin límite
+  uint32_t effVolMl_ = 0;   // volumen objetivo del paso (zona) en mL; 0 = sin límite
 };

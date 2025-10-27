@@ -1,4 +1,3 @@
-// File: src/main.cpp
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -66,6 +65,9 @@ static const char* NS_MODE = "mode";
 static bool gOvrEnabled = false;   // si true, ignora el switch físico
 static bool gOvrManual  = false;   // si gOvrEnabled, true=Manual, false=Auto
 
+// ===== NUEVO: tópico de telemetría de riego =====
+static const char* RIEGO_TOPIC = "public/riegoArandanosDeMiPueblo";
+
 // =================== HELPERS: Tiempo ===================
 static String nowString() {
   time_t now = time(nullptr);
@@ -97,12 +99,10 @@ static bool tryAutoConnectFromPrefs() {
   WiFi.mode(WIFI_AP_STA);
   WiFi.setAutoConnect(true);
   WiFi.setAutoReconnect(true);
-  // WiFi.setSleep(false); // si quieres evitar ahorro de energía
 
   if (open) WiFi.begin(ssid.c_str());
   else      WiFi.begin(ssid.c_str(), pass.c_str());
 
-  // En este core devuelve uint8_t; úsalo como entero.
   int r = WiFi.waitForConnectResult(6000);
   Serial.printf("[WiFi] AutoConnect '%s' -> %d, IP=%s\n",
                 ssid.c_str(), r, WiFi.localIP().toString().c_str());
@@ -290,6 +290,48 @@ static void ensureStateDefaults(std::vector<RelayState>& out) {
   saveRelayStates(out);
 }
 
+// ====== (NUEVO) Mapear RelayState -> StepSpec.idx y sincronizar Set 0 ======
+static int firstMainBit(uint16_t mm) {
+  for (int i = 0; i < HW_NUM_MAINS; ++i) if (mm & (1u << i)) return i;
+  return -1;
+}
+static bool secIsDirect(uint16_t sm) {
+  // En tu hardware: direct => S1=ON, S0=OFF ; alterno => S0=ON, S1=OFF
+  if (sm & (1u<<1)) return true;   // S1 activo -> direct
+  if (sm & (1u<<0)) return false;  // S0 activo -> alterno
+  return true; // por defecto
+}
+static int relayStateToStepIdx(const RelayState& rs) {
+  int m = firstMainBit(rs.mainsMask);
+  if (m < 0) m = 0; // fallback
+  bool direct = secIsDirect(rs.secsMask);
+  return m*2 + (direct ? 0 : 1);
+}
+static void ensureStepsCoverAllStates() {
+  if (gIrrCfg.program.sets.empty()) {
+    StepSet s; s.name = "Default"; s.pauseMsBetweenSteps = 10000;
+    gIrrCfg.program.sets.push_back(s);
+  }
+  StepSet& s0 = gIrrCfg.program.sets[0];
+
+  // Si ya coincide el tamaño, no tocamos para no pisar ajustes finos
+  if (s0.steps.size() == gStates.size()) return;
+
+  s0.steps.clear();
+  s0.steps.reserve(gStates.size());
+  for (size_t i = 0; i < gStates.size(); ++i) {
+    StepSpec sp;
+    sp.idx           = relayStateToStepIdx(gStates[i]);
+    sp.maxDurationMs = 0; // objetivos reales vendrán por NVS "zones"
+    sp.targetMl      = 0;
+    s0.steps.push_back(sp);
+  }
+
+  // Persistir y reinyectar al motor sin reiniciar
+  saveIrrConfig(gIrrCfg);
+  modesSetProgram(gIrrCfg.program, gIrrCfg.flowCal);
+}
+
 static void applyAndSave() {
   saveIrrConfig(gIrrCfg);
   delay(50);
@@ -387,13 +429,16 @@ void setup() {
   }
 
   // **ENLACE NUEVO**: pasar programa/calibración vivos al motor Auto
-  modesSetProgram(gIrrCfg.program, gIrrCfg.flowCal);  // <<<<<<<<<<<<<<<<<<<<<<<< ADICIÓN
+  modesSetProgram(gIrrCfg.program, gIrrCfg.flowCal);
 
   // Cargar catálogo de ESTADOS (o crear defaults si vacío)
   if (!loadRelayStates(gStates)) {
     gStates.clear();
   }
   ensureStateDefaults(gStates);
+
+  // 🔧 Asegurar que el programa tenga un paso por cada zona
+  ensureStepsCoverAllStates();
 
   // Zona horaria + NTP
   setenv("TZ", gIrrCfg.tz.c_str(), 1);
@@ -410,6 +455,22 @@ void setup() {
   chat.setTopic(cfg.topic);
   chat.setSubTopic(cfg.subTopic);
   chat.begin();
+
+  // ===== NUEVO: cableado de publicación de eventos de riego =====
+  modesSetEventPublisher(
+    [&](const String& topic, const String& payload){
+      (void)chat.publishTo(topic, payload);
+    },
+    String(RIEGO_TOPIC)
+  );
+
+  // ===== NUEVO: resolver nombre de estado (por índice de paso dentro del set) =====
+  modesSetStateNameResolver([&](int stepIdx)->String{
+    if (stepIdx >= 0 && stepIdx < (int)gStates.size() && gStates[stepIdx].name.length()) {
+      return gStates[stepIdx].name;
+    }
+    return String("Paso ")+String(stepIdx);
+  });
 
   // Web UI
   static WebUI ui(server, chat, cfg, cfgStore);

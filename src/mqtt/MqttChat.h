@@ -1,3 +1,4 @@
+// File: src/mqtt/MqttChat.h
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
@@ -15,18 +16,20 @@ public:
            const char* pass,
            const char* topic_default);
 
-  void begin();                 // Llama en setup()
-  void loop();                  // Mantiene MQTT (llamar en loop si hay WiFi)
-  bool publish(const String& msg);
+  void begin();                 // Llamar en setup()
+  void loop();                  // Mantener MQTT (llamar en loop si hay WiFi)
+
+  bool publish(const String& msg);                         // publica a topic_ actual
+  bool publishTo(const String& topic, const String& msg);  // publica a topic arbitrario
 
   // Tópicos
-  void setTopic(const String& topic);
+  void   setTopic(const String& topic);
   String getTopic() const { return topic_; }
 
-  void setSubTopic(const String& topic);   // NUEVO
-  String getSubTopic() const { return subTopic_; } // NUEVO
-  void subscribe();                        // NUEVO (activa suscripción)
-  void unsubscribe();                      // NUEVO
+  void   setSubTopic(const String& topic);
+  String getSubTopic() const { return subTopic_; }
+  void   subscribe();
+  void   unsubscribe();
 
   // Conexión
   bool connected() { return mqtt_.connected(); }
@@ -41,7 +44,10 @@ public:
   void setAuth(const String& user, const String& pass);
 
   // Handler de mensajes entrantes
-  void onMessage(MessageHandler cb);       // NUEVO
+  void onMessage(MessageHandler cb);
+
+  // Opcional: ampliar buffer de PubSubClient (para JSON grandes)
+  void setBufferSize(size_t n);
 
 private:
   String makeClientId() const;
@@ -52,13 +58,13 @@ private:
   String      pass_;
   String      topic_;
 
-  // NUEVO
+  // Suscripción
   String          subTopic_;
   bool            subActive_   = false;  // ¿debo estar suscrito?
   bool            subscribed_  = false;  // ¿ya hice subscribe() con éxito?
   MessageHandler  handler_;
 
-  const char*    root_ca_pem_ = nullptr;
+  const char*     root_ca_pem_ = nullptr;
 
   WiFiClientSecure tls_;
   PubSubClient     mqtt_;

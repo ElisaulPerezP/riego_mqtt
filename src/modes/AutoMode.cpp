@@ -2,7 +2,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <math.h>
-#include <Preferences.h>   // NVS ventanas
+#include <Preferences.h>   // NVS ventanas / zonas
 
 // ====== estáticos ISR ======
 volatile unsigned long AutoMode::pulse1_ = 0;
@@ -25,10 +25,19 @@ AutoMode::AutoMode(RelayBank& bank,
                    int pinFlow1, int pinFlow2)
 : bank_(bank),
   customStates_(customStates), numStates_(numStates),
-  stateDurMs_(stateDurationMs), offDurMs_(offDurationMs),
+  stateDurMs_(stateDurationMs), offDurationMs_(offDurationMs),
   stepDelayMs_(stepDelayMs),
   pinFlow1_(pinFlow1), pinFlow2_(pinFlow2)
 {}
+
+// ------------------- setters nuevos -------------------
+void AutoMode::setEventPublisher(EventPublisher pub, const String& topic) {
+  publisher_ = pub;
+  if (topic.length()) pubTopic_ = topic;
+}
+void AutoMode::setStateNameResolver(StateNameResolver res) {
+  nameRes_ = res;
+}
 
 // ------------------- ISR caudal -------------------
 void IRAM_ATTR AutoMode::isrFlow1Thunk() {
@@ -78,6 +87,14 @@ void AutoMode::reset() {
   timeScale_    = 1.0f;
   volScale_     = 1.0f;
 
+  haveCurWindow_       = false;
+  curWindowStartEpoch_ = 0;
+  curWindowEndEpoch_   = 0;
+  curWindowName_       = "";
+
+  effDurMs_ = 0;
+  effVolMl_ = 0;
+
   allOff_();
 }
 
@@ -108,6 +125,8 @@ void AutoMode::setSchedule(const ProgramSpec* prog, const FlowCalibration* cal) 
   runVolumeMl_ = 0;
   curStartIdx_ = -1;
   curSetIdx_   = -1;
+  effDurMs_ = 0;
+  effVolMl_ = 0;
 }
 
 // ------------------- Telemetría -------------------
@@ -146,12 +165,13 @@ AutoMode::Tele AutoMode::telemetry() const {
     t.mainIndex  = idx / 2;
     t.direct     = ((idx & 1) == 0);
 
-    // límites (escalados)
+    // límites efectivos
+    // Preferimos los objetivos efectivos (NVS) si existen; si no, escalados de StepSpec.
     const uint32_t durScaled = sp->maxDurationMs ? (uint32_t)lroundf((float)sp->maxDurationMs * timeScale_) : 0;
     const uint32_t volScaled = sp->targetMl     ? (uint32_t)lroundf((float)sp->targetMl     * volScale_ ) : 0;
 
-    t.stateDurationMs = durScaled;
-    t.stateTargetMl   = volScaled;
+    t.stateDurationMs = effDurMs_ ? effDurMs_ : durScaled;
+    t.stateTargetMl   = effVolMl_ ? effVolMl_ : volScaled;
     t.stateElapsedMs  = millis() - stepStartMs_;
 
     // volumen del paso (delta)
@@ -261,7 +281,7 @@ void AutoMode::handlePhaseLogic() {
       }
     }
   } else {
-    if (now - phaseStart_ >= offDurMs_) {
+    if (now - phaseStart_ >= offDurationMs_) {
       activePhase_ = true;
       stateIndex_  = 0;
       phaseStart_ = stateStart_ = now;
@@ -345,6 +365,9 @@ void AutoMode::startProgramForStart(size_t startIdx) {
   stepStartP2_ = pulse2_;
   interrupts();
 
+  effDurMs_ = 0;
+  effVolMl_ = 0;
+
   beginStep_(stepIdx_);
 }
 
@@ -355,6 +378,14 @@ void AutoMode::stopProgram() {
   stepIdx_ = 0;
   curStartIdx_ = -1;
   curSetIdx_   = -1;
+
+  haveCurWindow_       = false;
+  curWindowStartEpoch_ = 0;
+  curWindowEndEpoch_   = 0;
+  curWindowName_       = "";
+
+  effDurMs_ = 0;
+  effVolMl_ = 0;
 }
 
 void AutoMode::beginStep_(size_t idx) {
@@ -369,6 +400,23 @@ void AutoMode::beginStep_(size_t idx) {
   stepStartP1_ = pulse1_;
   stepStartP2_ = pulse2_;
   interrupts();
+
+  // ====== Objetivos efectivos (NVS zonas) ======
+  // 1) escalados a partir del StepSpec
+  const StepSpec& sp = set.steps[idx];
+  const uint32_t durScaled = sp.maxDurationMs ? (uint32_t)lroundf((float)sp.maxDurationMs * timeScale_) : 0;
+  const uint32_t volScaled = sp.targetMl     ? (uint32_t)lroundf((float)sp.targetMl     * volScale_ ) : 0;
+
+  // 2) leer NVS: "zones" -> z{idx}_time / z{idx}_vol
+  uint32_t zVol = 0, zTime = 0;
+  (void)readZoneTargetsNVS_((int)idx, zVol, zTime);
+
+  // 3) elegir objetivos efectivos (preferir NVS si >0)
+  effDurMs_ = (zTime > 0) ? zTime : durScaled;
+  effVolMl_ = (zVol  > 0) ? zVol  : volScaled;
+
+  // ====== PUBLICACIÓN: inicio de estado con objetivos efectivos ======
+  publishStateStart_(idx, effDurMs_, effVolMl_);
 }
 
 void AutoMode::finishStep_() {
@@ -382,6 +430,11 @@ void AutoMode::finishStep_() {
 
   if (!prog_ || curSetIdx_ < 0 || (size_t)curSetIdx_ >= prog_->sets.size()) { stopProgram(); return; }
   const StepSet& set = prog_->sets[curSetIdx_];
+
+  // ====== PUBLICACIÓN: fin de estado (volumen/tiempo reales) ======
+  uint32_t durReal = msSince(stepStartMs_);
+  uint32_t volReal = volumeMlFromPulses_(d1, d2);
+  publishStateEnd_(stepIdx_, durReal, volReal);
 
   // ¿hay pausa?
   uint32_t pauseMs = set.pauseMsBetweenSteps ? (uint32_t)lroundf((float)set.pauseMsBetweenSteps * timeScale_) : 0;
@@ -455,6 +508,9 @@ void AutoMode::runScheduled() {
           stepStartP2_ = pulse2_;
           interrupts();
 
+          effDurMs_ = 0;
+          effVolMl_ = 0;
+
           beginStep_(stepIdx_);
 
           gLastWinYDay     = nowTm.tm_yday;
@@ -465,9 +521,25 @@ void AutoMode::runScheduled() {
     }
   }
 
-  // Si estamos corriendo o en pausa y salimos de franja: detener
+  // Si estamos corriendo o en pausa y salimos de franja: detener **publicando** fin de estado
   if ((phase_ == Phase::RUN_STEP || phase_ == Phase::PAUSE) && !allowedNowByWindows_()) {
-    stopProgram();
+
+    if (phase_ == Phase::RUN_STEP) {
+      // Medidas reales hasta este instante
+      noInterrupts();
+      unsigned long p1 = pulse1_, p2 = pulse2_;
+      interrupts();
+
+      uint32_t d1 = (uint32_t)(p1 - stepStartP1_);
+      uint32_t d2 = (uint32_t)(p2 - stepStartP2_);
+      uint32_t volReal = volumeMlFromPulses_(d1, d2);
+      uint32_t durReal = msSince(stepStartMs_);
+
+      // Publicar el cierre
+      publishStateEnd_(stepIdx_, durReal, volReal);
+    }
+
+    stopProgram();   // apaga y resetea fase
     return;
   }
 
@@ -476,28 +548,49 @@ void AutoMode::runScheduled() {
 
   // Paso en ejecución
   if (phase_ == Phase::RUN_STEP) {
+    // Objetivos efectivos ya están en effDurMs_/effVolMl_ (inicializados en beginStep_)
     const StepSpec& sp = set.steps[stepIdx_];
 
-    // Volumen
-    uint32_t volTarget = sp.targetMl ? (uint32_t)lroundf((float)sp.targetMl * volScale_) : 0;
-    if (volTarget > 0 && (cal_.pulsesPerMl1 > 0.f || cal_.pulsesPerMl2 > 0.f)) {
+    // Volumen (si hay objetivo)
+    if (effVolMl_ > 0 && (cal_.pulsesPerMl1 > 0.f || cal_.pulsesPerMl2 > 0.f)) {
       noInterrupts();
       unsigned long p1 = pulse1_, p2 = pulse2_;
       interrupts();
       uint32_t d1 = (uint32_t)(p1 - stepStartP1_);
       uint32_t d2 = (uint32_t)(p2 - stepStartP2_);
       uint32_t ml  = volumeMlFromPulses_(d1, d2);
-      if (ml >= volTarget) {
+      if (ml >= effVolMl_) {
         finishStep_();
         return;
       }
+    } else if (effVolMl_ == 0) {
+      // Si no hay objetivo por NVS, revisa si StepSpec trae volumen escalado (>0)
+      uint32_t volScaled = sp.targetMl ? (uint32_t)lroundf((float)sp.targetMl * volScale_) : 0;
+      if (volScaled > 0 && (cal_.pulsesPerMl1 > 0.f || cal_.pulsesPerMl2 > 0.f)) {
+        noInterrupts();
+        unsigned long p1 = pulse1_, p2 = pulse2_;
+        interrupts();
+        uint32_t d1 = (uint32_t)(p1 - stepStartP1_);
+        uint32_t d2 = (uint32_t)(p2 - stepStartP2_);
+        uint32_t ml  = volumeMlFromPulses_(d1, d2);
+        if (ml >= volScaled) {
+          finishStep_();
+          return;
+        }
+      }
     }
 
-    // Tiempo
-    uint32_t durMs = sp.maxDurationMs ? (uint32_t)lroundf((float)sp.maxDurationMs * timeScale_) : 0;
-    if (durMs > 0 && msSince(stepStartMs_) >= durMs) {
+    // Tiempo (si hay objetivo)
+    if (effDurMs_ > 0 && msSince(stepStartMs_) >= effDurMs_) {
       finishStep_();
       return;
+    } else if (effDurMs_ == 0) {
+      // Si no hay objetivo por NVS, usa el del StepSpec escalado (si existe)
+      uint32_t durScaled = sp.maxDurationMs ? (uint32_t)lroundf((float)sp.maxDurationMs * timeScale_) : 0;
+      if (durScaled > 0 && msSince(stepStartMs_) >= durScaled) {
+        finishStep_();
+        return;
+      }
     }
   }
 
@@ -601,4 +694,149 @@ bool AutoMode::allowedNowByWindows_() const {
     if (md >= s && md < e) return true;
   }
   return false;
+}
+
+// =================== Helpers nuevos (ventana + JSON) ===================
+String AutoMode::two_(int v){ if (v<0) v=0; if (v>99) v%=100; char b[3]; snprintf(b,sizeof(b),"%02d",v); return String(b); }
+String AutoMode::hhmm_(int m){ if (m<0) m=0; if (m>=1440) m%=1440; return two_(m/60)+":"+two_(m%60); }
+String AutoMode::isoLocal_(time_t epoch){
+  if (epoch <= 0) return String("-");
+  struct tm tm; if (!localtime_r(&epoch, &tm)) return String("-");
+  char b[32]; strftime(b, sizeof(b), "%Y-%m-%d %H:%M:%S", &tm);
+  return String(b);
+}
+String AutoMode::jsonEscape_(const String& s){
+  String o; o.reserve(s.length()+4);
+  for (size_t i=0;i<s.length();++i){
+    char c=s[i];
+    if (c=='\\' || c=='"'){ o += '\\'; o += c; }
+    else if (c=='\n'){ o += "\\n"; }
+    else if (c=='\r'){ o += "\\r"; }
+    else if (c=='\t'){ o += "\\t"; }
+    else { o += c; }
+  }
+  return o;
+}
+
+bool AutoMode::computeCurrentWindow_(int& sminOut, int& eminOut, time_t& startEpochOut, time_t& endEpochOut, String& nameOut) const {
+  sminOut = -1; eminOut = -1; startEpochOut = 0; endEpochOut = 0; nameOut = "";
+  struct tm nowTm;
+  if (!timeNow(nowTm)) return false;
+
+  int md = nowTm.tm_hour*60 + nowTm.tm_min;
+
+  struct Win { uint8_t sh, sm, eh, em; };
+  bool found=false; int smin=0, emin=0;
+
+  Preferences p;
+  if (p.begin("windows", true)) {
+    uint8_t cnt = p.getUChar("count", 0);
+    for (uint8_t i=0;i<cnt && i<60;i++){
+      uint8_t sh = p.getUChar((String("w")+i+"_sh").c_str(), 0);
+      uint8_t sm = p.getUChar((String("w")+i+"_sm").c_str(), 0);
+      uint8_t eh = p.getUChar((String("w")+i+"_eh").c_str(), 0);
+      uint8_t em = p.getUChar((String("w")+i+"_em").c_str(), 0);
+      int s = (int)sh*60 + (int)sm;
+      int e = (int)eh*60 + (int)em;
+      if (s<e && md>=s && md<e){ found=true; smin=s; emin=e; break; }
+    }
+    p.end();
+  }
+
+  if (!found) {
+    // Sin ventanas configuradas -> etiqueta genérica
+    nameOut = "Sin ventana";
+    sminOut = 0; eminOut = 1440;
+    // Epochs del día actual
+    struct tm st=nowTm, en=nowTm;
+    st.tm_hour=0; st.tm_min=0; st.tm_sec=0;
+    en.tm_hour=23; en.tm_min=59; en.tm_sec=59;
+    startEpochOut = mktime(&st);
+    endEpochOut   = mktime(&en);
+    return true;
+  }
+
+  sminOut = smin; eminOut = emin;
+  nameOut = String("Ventana ")+hhmm_(smin)+"–"+hhmm_(emin);
+
+  struct tm st=nowTm, en=nowTm;
+  st.tm_hour = smin/60; st.tm_min = smin%60; st.tm_sec = 0;
+  en.tm_hour = emin/60; en.tm_min = emin%60; en.tm_sec = 0;
+  startEpochOut = mktime(&st);
+  endEpochOut   = mktime(&en);
+  return true;
+}
+
+void AutoMode::publishStateStart_(size_t stepIdx, uint32_t durMsTarget, uint32_t volMlTarget) {
+  if (!publisher_) return;
+
+  // Refrescar/obtener ventana actual
+  int smin=0, emin=0; time_t se=0, ee=0; String wname;
+  haveCurWindow_ = computeCurrentWindow_(smin, emin, se, ee, wname);
+  if (haveCurWindow_) {
+    curWindowStartEpoch_ = se;
+    curWindowEndEpoch_   = ee;
+    curWindowName_       = wname;
+  } else {
+    curWindowStartEpoch_ = 0;
+    curWindowEndEpoch_   = 0;
+    curWindowName_       = "—";
+  }
+
+  String stateName = nameRes_ ? nameRes_((int)stepIdx) : (String("Paso ")+String((int)stepIdx));
+
+  time_t nowE = time(nullptr);
+  String payload = "{"
+    "\"event\":\"state_start\","
+    "\"window\":{"
+      "\"name\":\""+jsonEscape_(curWindowName_)+"\","
+      "\"start\":\""+isoLocal_(curWindowStartEpoch_)+"\","
+      "\"end\":\""+isoLocal_(curWindowEndEpoch_)+"\"},"
+    "\"state\":{"
+      "\"name\":\""+jsonEscape_(stateName)+"\","
+      "\"volume_ml\":" + String(volMlTarget) + ","
+      "\"duration_ms\":" + String(durMsTarget) + "},"
+    "\"at\":\""+isoLocal_(nowE)+"\""
+  "}";
+
+  publisher_(pubTopic_, payload);
+}
+
+void AutoMode::publishStateEnd_(size_t stepIdx, uint32_t durMsReal, uint32_t volMlReal) {
+  if (!publisher_) return;
+
+  String stateName = nameRes_ ? nameRes_((int)stepIdx) : (String("Paso ")+String((int)stepIdx));
+  time_t nowE = time(nullptr);
+
+  // Usamos las MISMAS claves que en state_start para reducir tamaño
+  String payload = "{"
+    "\"event\":\"state_end\","
+    "\"window\":{"
+      "\"name\":\""+jsonEscape_(curWindowName_)+"\","
+      "\"start\":\""+isoLocal_(curWindowStartEpoch_)+"\","
+      "\"end\":\""+isoLocal_(curWindowEndEpoch_)+"\"},"
+    "\"state\":{"
+      "\"name\":\""+jsonEscape_(stateName)+"\","
+      "\"volume_ml\":" + String(volMlReal) + ","
+      "\"duration_ms\":" + String(durMsReal) + "},"
+    "\"at\":\""+isoLocal_(nowE)+"\""
+  "}";
+
+  publisher_(pubTopic_, payload);
+}
+
+
+// =================== NVS zonas ===================
+bool AutoMode::readZoneTargetsNVS_(int zoneIdx, uint32_t& volMlOut, uint32_t& timeMsOut) {
+  volMlOut = 0; timeMsOut = 0;
+  if (zoneIdx < 0) return false;
+
+  Preferences p;
+  if (!p.begin("zones", /*ro*/ true)) return false;
+
+  String base = String("z") + String(zoneIdx) + "_";
+  volMlOut = p.getUInt((base + "vol").c_str(),  0);
+  timeMsOut= p.getUInt((base + "time").c_str(), 0);
+  p.end();
+  return (volMlOut > 0 || timeMsOut > 0);
 }

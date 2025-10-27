@@ -81,6 +81,11 @@ bool MqttChat::publish(const String& msg) {
   return mqtt_.publish(topic_.c_str(), msg.c_str(), false);
 }
 
+bool MqttChat::publishTo(const String& topic, const String& msg) {
+  if (!ensureConnected()) return false;
+  return mqtt_.publish(topic.c_str(), msg.c_str(), false);
+}
+
 void MqttChat::setTopic(const String& topic) {
   if (topic.length()) topic_ = topic;
 }
@@ -131,4 +136,9 @@ void MqttChat::setAuth(const String& user, const String& pass) {
 
 void MqttChat::onMessage(MqttChat::MessageHandler cb) {
   handler_ = cb;
+}
+
+// Opcional: ampliar el buffer para payloads JSON más grandes
+void MqttChat::setBufferSize(size_t n) {
+  mqtt_.setBufferSize(n);
 }
